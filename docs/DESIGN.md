@@ -2,7 +2,7 @@
 
 2026-10-05 首版设计，**本文是权威设计**。实现中如果要改设计，先改本文，并在提交说明里写清改了什么、为什么改。
 
-当前状态：仓库里还没有代码。第一阶段的能力实测（见[实施计划](实施计划.md)）是开始实现的门槛。
+当前状态：第一阶段能力实测已完成，门槛 A、B、C、F 在两种工具上满足（见[能力实测报告](调研/第一阶段能力实测.md)）；正式代码还没开始写。
 
 背景、讨论过程和被否决的方案见[背景与决策记录](背景与决策记录.md)；agent hooks 的官方资料摘录见[调研/agent-hooks资料](调研/agent-hooks资料.md)。
 
@@ -70,10 +70,14 @@ cairn 是给终端里的 coding agent 用的**工作接续记忆工具**。名�
 agent（Claude Code / Codex）
   │ hook：stdin 收到官方 JSON                 │ shell 工具：cairn save（正文走 stdin）
   ▼                                           ▼
-cairn hook <agent> ──适配器翻译成标准事件──►  核心：判定 · 存储 · 渲染  ◄── cairn save
+cairn hook <agent> ──适配器翻译成标准事件──►  核心：判定 · 存储 · 渲染       cairn save
+        │                                      ▲                            │ 写一个暂存文件
+        └──── 先收取暂存区（§6.5）──────────────┘◄──── 暂存区（用户私有临时目录）◄┘
                                                ▲
 用户：cairn adopt / show / list / correct / retract / restore / delete / export / install / status
 ```
+
+`cairn save` 不直接写数据库，只把记录写进暂存区；数据库只由 hook 和用户命令写入。原因是 Codex 默认的 workspace-write 沙箱不允许 agent 的 shell 写工作区外的状态目录，但允许写当前用户的私有临时目录；hook 进程不受这个沙箱限制（第一阶段 C 及补测）。两种工具走同一条路径，不按工具分叉。
 
 核心只认识下面几种标准事件，适配器负责在官方字段和标准事件之间互相翻译：
 
@@ -120,6 +124,7 @@ cairn hook <agent> ──适配器翻译成标准事件──►  核心：判�
 - `busy_timeout`：hook 路径要短，建议 200 ms 左右；用户命令可以长一些，比如 2 s。
 - 加锁超时或数据库出错时，hook 一律放行（§8.6）。
 - 只读命令（show、list）在数据库不存在时报告"尚无数据"，不创建库。
+- 暂存区：`<用户私有临时目录>/cairn-spool/`，见 §6.5。
 
 ### 6.2 表结构草案（v1）
 
@@ -159,7 +164,7 @@ CREATE TABLE turn_decisions (                                           -- 回�
   outcome TEXT NOT NULL,                                                -- confirmed / continue_requested / unconfirmed_after_continue / skipped
   at TEXT NOT NULL, PRIMARY KEY (source_id, turn_key, outcome));
 CREATE TABLE events (                                                   -- 观测到的事件，用于缺口报告
-  id INTEGER PRIMARY KEY, source_id TEXT NOT NULL, kind TEXT NOT NULL, -- session_started / session_ended / turn_unconfirmed …
+  id INTEGER PRIMARY KEY, source_id TEXT NOT NULL, kind TEXT NOT NULL, -- session_started / session_ended / turn_unconfirmed / save_rejected …
   at TEXT NOT NULL, detail TEXT);
 ```
 
@@ -197,6 +202,30 @@ CREATE TABLE events (                                                   -- 观�
 
 将来真要同步，可以在这两点上做导出、导入和合并。不要把数据库文件放进 iCloud、Dropbox 这类同步目录。
 
+### 6.5 暂存区与收取
+
+用户 2026-10-05 选定的写入路线（第一阶段 C 补测通过；`--yolo` 只用于实测对照，D11 不变）。
+
+**位置**
+- macOS：`confstr(_CS_DARWIN_USER_TEMP_DIR)`（即 `getconf DARWIN_USER_TEMP_DIR`）下的 `cairn-spool/`。补测确认 Codex 默认沙箱里 shell 的 `$TMPDIR` 与它逐字相同，且该路径在沙箱可写范围内。取不到时退回 `$TMPDIR`。
+- 目录 0700，文件 0600；创建时如果目录已存在但属主不是当前用户或权限更宽，拒绝使用并报错。
+- 首版只支持 macOS（D3：本机单机）。其他平台的暂存位置以后再定。
+
+**写入（`cairn save` 一侧）**
+- 一次 save 写一个文件：先写 `.<记录ID>.tmp`，`fsync` 后 `rename` 成 `<记录ID>.json`。收取方只认 `.json`，所以不会读到写了一半的文件。
+- 文件内容是一条完整的待入库记录：记录 ID（ULID，save 时生成）、来源、cwd、项目键、工作线、分支、kind、正文或 `nothing_new`、`supersedes` 列表、程序采集的事实、`created_at`、暂存格式版本号。
+- save 不打开数据库：沙箱里连 WAL 模式的只读打开都要写 `-shm`，不可靠。
+
+**收取（hook 与用户命令一侧）**
+- 时机：SessionStarted 渲染之前、TurnEnded 判定之前、所有用户命令执行之前。SessionEnded 时限太短，不收取。
+- 每次收取处理全部 `.json` 文件，不只当前来源的；按文件名（ULID，大致按时间）顺序。单次有上限（建议 50 个文件或 300 ms），剩下的留给下一次。
+- 每个文件：解析 → 按 §8.2 的规则校验 → 在一个事务里写入记录、取代关系、确认 → 提交后删除文件。
+- 幂等：记录 ID 是主键，插入冲突则忽略（说明另一个并发收取已经写过），随后照样删除文件。两个 hook 同时收取同一个文件，结果只有一条记录。
+- 校验不通过（项目未采用、取代对象不合规、格式坏了）：不写记录，写一条 `save_rejected` 事件（来源、记录 ID、原因，不含正文），删除文件。
+- 数据库忙或出错：文件留在原处，下次再收；hook 照常按 §8.6 放行。
+
+**风险**：一直没有 hook 或用户命令运行时，文件留在临时目录里，可能被系统清理临时文件时删掉（R9）。`cairn status` 报告暂存区里待收取的文件数。
+
 ## 7. 命令接口草案
 
 ```text
@@ -214,16 +243,16 @@ cairn install|uninstall --agent <claude|codex> [--dry-run|--yes]
 cairn status [--json]
 ```
 
-- **受限入口**：agent 只用 `cairn save`。其他命令是给用户用的，agent 只在用户明确要求时才执行。如果需要权限规则，只放行 `cairn save` 一个入口，具体写法由第一阶段确定。
+- **受限入口**：agent 只用 `cairn save`。其他命令是给用户用的，agent 只在用户明确要求时才执行。权限规则只放行 `cairn save` 一个入口（Claude 的写法见 §10.1）。
 - **退出码**：`cairn hook` 一律 0（§8.6）。用户命令出错时返回非 0，并在 stderr 给出一行说明。
-- **`save` 的写入**：校验正文、采集事实、核对取代对象，然后在一个事务里插入记录、取代关系和确认。stdout 只输出一行，例如 `saved r-01J… blog · main · 9c1e2ab`。
+- **`save` 的写入**：校验正文、采集事实，把记录写进暂存区（§6.5），不碰数据库。取代对象、项目是否采用，在收取时核对。stdout 只输出一行，例如 `saved r-01J… blog · main · 9c1e2ab`。
 
 ## 8. 流程
 
 ### 8.1 SessionStarted
 
 1. 解析 stdin，判定项目。未采用：退出码 0，不输出任何内容。
-2. 写入或更新来源，记一条 `session_started` 事件。
+2. 收取暂存区（§6.5）。写入或更新来源，记一条 `session_started` 事件。
 3. 渲染注入文本（§9），把注入了哪些记录写进 `injections`。
 4. 按适配器约定输出（§10）。
 5. 不同的 start_kind：
@@ -233,19 +262,31 @@ cairn status [--json]
 
 ### 8.2 `cairn save`
 
-1. 判定项目和工作线。项目未采用时返回非 0，并提示"项目未采用"。
-2. 校验正文（`--nothing-new` 时不需要正文）。
-3. 采集事实：HEAD、分支、本地上游 ref 及 ahead/behind、工作区里已暂存、未暂存、未跟踪文件的数量、采集时间。
-4. 核对每个 `--supersedes` 对象，以下条件都满足才接受，任何一条不满足就整次失败、不写入：
+分两段：save 进程只做不需要数据库的部分；需要数据库的核对放在收取时（§6.5）。
+
+save 进程里：
+
+1. 判定项目键和工作线（调用 git，不读数据库）。不在 Git 里的目录按 §3 用当前目录。
+2. 校验正文（`--nothing-new` 时不需要正文）。不通过就返回非 0，不写暂存文件。
+3. 采集事实：HEAD、分支、本地上游 ref 及 ahead/behind、工作区里已暂存、未暂存、未跟踪文件的数量、采集时间。git 调用加 `--no-optional-locks`，避免在沙箱里试图写 `.git/index.lock`。
+4. 写暂存文件，输出一行 `saved …`。
+
+收取时：
+
+5. 项目未采用：拒收（§6.5）。
+6. 核对每个 `supersedes` 对象，以下条件都满足才接受，任何一条不满足就整条拒收、不写入：
    - 记录存在、没被删除；
    - 和当前记录同项目、同工作线；
    - 曾经注入给当前来源（`injections` 里有）。
-5. 一个事务里写入：记录、取代关系、`confirmations`。
+7. 一个事务里写入：记录、取代关系、`confirmations`。确认时间用暂存文件里的 `created_at`，不用收取时间。
+
+拒收的结果只能在之后告诉模型：本回合的 TurnEnded 会把拒收原因放进续跑请求（§8.3）。项目未采用时 hook 不注入接续约定，模型一般不会调用 save；用户在未采用的项目里手动 save，会在下一次收取时被拒收，`cairn status` 能看到。
 
 ### 8.3 TurnEnded：回合结束判定
 
 按顺序执行，命中任何一步就停：
 
+0. 收取暂存区（§6.5）。收取失败不影响后面的步骤。
 1. 项目未采用，或者设置了 `CAIRN_DISABLE=1`：放行。第一阶段 H 已确认本机两种工具的 hook 能继承该变量；正式禁用逻辑仍由 cairn 实现。
 2. `continued`（`stop_hook_active`）为真：表示 Stop hook 触发的续跑，该字段不标识具体是哪一个 hook。写入 `confirmed` 或 `unconfirmed_after_continue`，然后放行。绝不再续跑第二次。
 3. 在"本回合的确认窗口"里查找这个来源的确认：
@@ -253,9 +294,10 @@ cairn status [--json]
    - 没有时，从上一次 TurnEnded 判定算起；
    - 再没有，就从会话开始算起。
    - 第一阶段 B 已确认普通用户提示的 UserPromptSubmit 带回合 ID，并与后续 Stop 对应；续跑没有额外的 UserPromptSubmit。缺事件或字段时仍保留上述降级窗口。
+   - 数据库里的确认之外，暂存区里还没收进来的、属于这个来源且在窗口内的文件也算确认（收取因数据库忙而失败时用得上）。
 4. 找到确认：写入 `confirmed`，放行。
 5. 没找到：先尝试插入 `(source, turn_key, continue_requested)`。
-   - 插入成功，就返回续跑请求，原因见 §9.3。
+   - 插入成功，就返回续跑请求，原因见 §9.3。窗口内这个来源有 `save_rejected` 事件时，原因里附上拒收原因（不含正文），请模型改正后重新 save。
    - 唯一键冲突，说明是重复事件，直接放行。
    - 没有 turn_key 时，用"来源 + 窗口起点"作为键。
 6. 任何错误或超时：放行，并把错误记到 cairn 自己的错误日志。
@@ -341,7 +383,8 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 - 第一阶段 A 已实测 startup、clear、compact、resume 的 JSON 注入；本轮没有测试 fork 或纯文本输出。
 - 第一阶段 D 已在 `-p` 正常完成、交互 `/exit`、`corral stop` 路径观测到 SessionEnd；不据此承诺崩溃路径一定送达。
 - 安装位置建议用户级 `~/.claude/settings.json`，增量合并并先备份。依据是项目 settings 与 Corral 会话 settings 的共存实测；用户级安装和插件安装本身尚未比较，阶段 3 在隔离 HOME 下验证。
-- 写入示例优先使用 `printf ... | cairn save --source ...`，并配置仅允许 save 的 Bash 规则。第一阶段 C 用绝对路径探针验证了窄规则下的管道正文与 `--nothing-new`；同一规则的 heredoc 被拒绝。默认 `auto` 曾成功也曾失败，不能承诺免干预。窄规则的成功样例来自非交互调用，交互固定配置组合仍有验证边界。
+- 写入示例使用 `printf ... | cairn save --source ...`，并配置一条只放行 save 的 Bash 规则（`Bash(<稳定命令路径> save:*)`）。第一阶段 C 验证了这条规则下管道正文与 `--nothing-new` 在非交互和交互（补测连续两轮）中都不弹确认；同一规则下 heredoc 被拒绝；不加规则时默认 `auto` 时好时坏。
+- 这条规则必须写进 settings 文件（安装时和 hooks 一起写入用户级 settings），**不能靠 `--settings` 参数传**：Corral 启动 Claude 时自己用 `--settings` 注入 hooks，补测里再加一个 `--settings` 后 Corral 收不到事件；同一条规则放在项目 settings 文件里则共存正常（报告 §14.2、§14.4）。
 
 ### 10.2 Codex
 
@@ -358,7 +401,7 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 - 第一阶段 A 已测交互 startup、clear、compact、resume 的 JSON 注入；compact 后的事件在下一次请求前出现。直接 exec 的注入复述边界见 §9.1。
 - 第一阶段 B 已观测到用户中断时有 Interrupt、没有正常 Stop。
 - SessionEnd 的文档触发时机包括正常关闭、归档/删除、无客户端打开且闲置 30 分钟；本轮只确认交互 `/exit` 和 `corral stop`。直接 exec 未获 SessionEnd handler 的持久信任，不将其没有探针日志解释为不支持。
-- 第一阶段 C 已确认默认 workspace-write 拒绝直写实验仓库外状态目录。用户授权的 `--yolo` 仅用于实测对照，产品不要求 yolo，§2 D11 的“不扩大沙箱”保持不变。cairn install 不自行改 sandbox/approval 配置；默认沙箱下后续补测的可行性证据见能力实测报告 §14，正式写入设计由主控另行更新。
+- 第一阶段 C 已确认默认 workspace-write 拒绝直写实验仓库外状态目录。用户授权的 `--yolo` 仅用于实测对照，产品不要求 yolo，§2 D11 的“不扩大沙箱”保持不变。cairn install 不自行改 sandbox/approval 配置。写入走暂存区（§6.5）：补测在默认沙箱下写入用户私有临时目录成功（报告 §14.1）。
 
 ### 10.3 安装通则
 
@@ -403,6 +446,7 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 - cairn 不连网。
 - 数据库和日志文件权限为 0600。
 - 删除时用 `secure_delete`，并清理 WAL，避免正文残留。
+- 暂存文件里有正文，收取前一直留在用户私有临时目录（0700 目录、0600 文件），收取后立即删除。删除暂存文件只是普通 unlink，不保证磁盘上不留痕迹；误存敏感内容时，`cairn delete` 只能处理已经入库的记录，还在暂存区的文件由用户手动删除（`cairn status` 给出路径）。
 - 只有在用户明确确认后才修改用户配置，改之前先备份。
 - 开发和测试只用合成材料，不碰真实数据（见 AGENTS.md）。
 
@@ -436,16 +480,17 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 | R2 | 用户中断、崩溃、在 Stop 之前退出的回合，没有保存机会 | 只按观测到的事实报告（§11.1） |
 | R3 | 每个正常回合多一次工具调用，并可能被权限拒绝 | C 已测 Claude 默认权限不可靠、窄 save 规则加 printf 管道可用；成本与交互固定配置仍需试点 |
 | R4 | 续跑产生新的最后回复，模型可能改变严格输出 | G 的 JSON/DONE 样例在原样重发约定下通过；Claude print 的 result 是续跑后的回答。通用原因不额外要求 DONE，不能把样例通过当作字节级保证 |
-| R5 | Codex 默认 workspace-write 已实测拒绝直写实验仓库外状态目录 | 保留直写失败证据；yolo 仅为实测对照，D11 不变，产品不要求扩大沙箱。默认沙箱下的补测路线通过，见能力实测报告 §14；后续实现须保持此权限边界 |
-| R6 | 非交互的权限和注入表现不能直接由交互结果推定 | H 已证实环境继承，可实现 `CAIRN_DISABLE=1` 按次关闭；A 的 exec 复述有一次失败、一次成功。用户很少用非交互，默认排除与是否阻断实施仍待明确 |
+| R5 | Codex 默认 workspace-write 已实测拒绝直写实验仓库外状态目录 | 保留直写失败证据；yolo 仅为实测对照，D11 不变，产品不要求扩大沙箱。改走暂存区（§6.5），补测在默认沙箱下通过 |
+| R6 | 非交互的权限和注入表现不能直接由交互结果推定 | H 已证实环境继承，可实现 `CAIRN_DISABLE=1` 按次关闭；A 的 exec 复述有一次失败、一次成功。用户 2026-10-05 决定：非交互的注入表现记为已知限制，不挡阶段 2，不再追查；是否默认排除仍待定（§15） |
 | R7 | 被委派 agent 的会话也会每回合确认，增加成本 | H 已通过 `corral start --env CAIRN_DISABLE=1` 的继承实测；实现禁用后是否默认这样启动，仍由用户决定 |
 | R8 | 模型可能写错、漏写，或者错误地声明取代 | 用户可以更正、撤回、恢复；注入时保留折叠提示 |
+| R9 | 暂存文件在收取前可能被系统清理临时目录时删掉；save 当时报了成功，拒收也只能事后告知 | 每个 hook 和用户命令都先收取，正常使用下暂存时间很短；拒收原因随续跑请求告诉模型（§8.3）；`cairn status` 报告待收取数量 |
 
 ## 15. 待定问题
 
 | 问题 | 由谁、什么时候定 |
 |---|---|
-| 最终的写入传输方式，以及权限、沙箱需要的最小配置 | C 补测：Claude 交互窄 save 规则加 printf 连续两轮写入通过；Codex 默认沙箱下的补测路线通过。D11 不变，不要求 yolo；主控依据报告补写正式传输设计，并处理 Claude 新配置组合的 Corral 共存缺口 |
+| 最终的写入传输方式，以及权限、沙箱需要的最小配置 | 已定：save 写暂存区、hook 收取（§6.5，用户 2026-10-05 选定）；Codex 不需要改沙箱；Claude 需要一条只放行 save 的规则，写进 settings 文件（§10.1） |
 | 回合起点怎么标出；续跑后 Codex 的 `turn_id` 会不会变 | B 已确认：使用 UserPromptSubmit；本轮 turn_id 不变、stop_hook_active=true，仍以续跑标记为准 |
 | Claude 的 hook 写在用户 settings 还是插件里 | E 建议用户 settings 增量合并；插件及用户级安装未实际比较，阶段 3 在隔离 HOME 下验证 |
 | 注入预算，以及 Codex 的 `additionalContextLimit` 设多少 | A 的交互样例通过：6,000 字符、Codex handler limit=6000；默认预算不够，见 §9.1 |
@@ -453,4 +498,4 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 | 正文长度上限、注入文字的最终措辞 | 阶段 2，可以试点再调；G 支持只要求原样重发，不加入额外结束标记 |
 | 是否要为被委派 agent 或脚本会话提供默认排除 | H 已确认环境继承；用户很少用非交互，未明确默认排除策略，仍由用户决定 |
 
-第一阶段结论与证据见[能力实测报告](调研/第一阶段能力实测.md) §11、§14。主控已向用户核实：yolo 只用于实测，D11 不变；非交互注入表现是已知限制，不挡阶段 2，不再追查。A、B、C 已满足本次明确的实测范围；F 的 Claude 原组合通过，但补测 --settings 窄规则组合下 Corral 无事件，仍需主控处理，不能宣布四项全部通过。本次仅修订指定的四处文字，其余章节中早先的交互配置、非交互门槛待定表述以此补测结论为准；本分支不推进核心实现。
+第一阶段结论与证据见[能力实测报告](调研/第一阶段能力实测.md) §11、§14。主控已向用户核实：yolo 只用于实测，D11 不变；非交互注入表现是已知限制，不挡阶段 2，不再追查。门槛 A、B、C、F 在两种工具上都满足本次明确的实测范围（报告 §11、§14.4）：F 的补测缺口来自额外的 `--settings` 参数，产品不用这种方式放规则。
