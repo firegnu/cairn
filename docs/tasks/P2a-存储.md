@@ -55,3 +55,28 @@
 
 ## 做完
 在本文件末尾追加「## 完成记录」（在你的分支里提交）：做了什么、验证了什么、拿主意的地方（尤其是表结构定稿时补的约束和索引）、没做的事，各几句话。回复里只写这几样，加上有没有要主控决定的事。命令都在前台跑完，全部做完后，回复最后一行写 DONE。
+
+## 完成记录
+
+2026-10-05，cairn/dev-store 完成。
+
+- **做了什么**：实现 `store.rs` 与 `store/schema.rs`，使用 `rusqlite`（bundled）。`database_path(xdg_state_home, home)` 显式接收调用方取得的环境值，纯计算目标路径并词法规范化，不访问文件系统；空 XDG 值回退到 HOME，缺少可用根路径或相对根路径报错。`Store::open` 创建私有目录/文件、配置 SQLite 并迁移；`Store::open_read_only` 在库不存在时返回 `None`。提供 `connection()`、可选事务行为的 `transaction()`、幂等的 `migrate()` 和 `delete_body(id, deleted_at)`，时间戳由调用方提供。锁等待两档为 Hook 200 ms、UserCommand 2 s。
+- **验证了什么**：新增 13 项存储集成测试。迁移幂等、纯路径计算、权限、未来版本无改写、缺库只读不创建、正文物理删除、只读拒绝宽权限，均先运行目标测试得到针对缺失行为的 RED，再实现并取得 GREEN；失败分别包括缺少 meta 表、路径未规范化、目录为 0755、未来库字节被 WAL 设置改变、只读路径创建了库、删除未执行、接受宽权限。正文测试先确认唯一合成标记同时存在于主库与 WAL，再验证删除后两处原始字节均不含标记，且墓碑元数据和其他正文保留。
+- **直接相关的边角验证**：写入打开收紧已有目录/主库/WAL/SHM 权限；只读连接读取尚在 WAL 的已提交数据并拒绝写入；迁移创建部分表后发生冲突会回滚表与版本；版本仅在 WAL 更新为未来版本时，两种打开方式均拒绝且主库/WAL 字节不变；外键、枚举、操作唯一键及五种回合结果去重；删除遇到活动读事务时返回检查点繁忙，释放读事务后重试清除残留并保留首次删除时间。全部材料都在 `tempdir` 内，路径函数显式传入临时 XDG_STATE_HOME/HOME 值，不修改进程全局环境，不访问真实状态目录。
+- **规定检查**：前台运行 `CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo test --all-targets` 一次通过（13 项存储测试、4 项原有探针测试）；随后前台运行 `CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo clippy --all-targets -- -D warnings` 一次通过。所有目标测试命令也均等待执行完毕。
+- **表结构定稿**：保留 §6.2 全部十张表与字段含义。补文本主键 NOT NULL、adopted 的 0/1 约束，以及 association、records.kind、confirmations.kind、turn_decisions.outcome、spool_ops.outcome 的设计枚举约束；`events.kind` 按草案保持可扩展。保留原外键和唯一键，包含 `confirmations.op_id UNIQUE` 与 `spool_ops.op_id` 主键。新增五个索引：records 的项目/工作线/来源/时间/ID，以及 records.target_id、supersessions.target_id、confirmations 的来源/时间、events 的来源/时间。未增加业务触发器，调用方通过连接写 SQL 时仍须遵守记录只追加与连接设置约定。
+- **其他拿主意的地方**：写入打开会收紧过宽权限，只读打开拒绝过宽权限而不 chmod；对已存在的 WAL 库，只读连接仍允许 SQLite 创建私有 sidecar，不迁移、不创建主库或目录。写入打开先用只读连接检查版本，避免先切 WAL 或关闭写连接时改写未来版本库。迁移用 IMMEDIATE 事务并在锁内复查版本。删除提交墓碑后检查 TRUNCATE 的返回状态，检查点繁忙不能当作成功；报错时墓碑可能已提交，调用方可安全重试。不存在的记录返回 false，重复删除保留最早 deleted_at。
+- **没做的事**：未实现 save、暂存收取、渲染、回合判定、用户命令或安装；未修改 scope/facts/lib/main/tools、DESIGN 或 HANDOFF；未运行真实 agent、未改真实配置或访问真实 cairn 数据；不合并 main、不推送。
+- **需要主控决定的事**：无。后续 2c–2f 可直接使用上述路径、连接与事务接口；2f 需把检查点失败作为删除尚未完成处理。
+
+## 返工记录
+
+2026-10-05，按主控转交的交叉审查第 1、2 条（必须改）和第 3 条（建议改）完成返工。主仓库的交叉审查文件仅读取，未修改。
+
+- **修复第 1、2 条**：两种打开方式共用 `checked_database_path`，在任何 SQLite 打开或版本查询之前，用 `symlink_metadata`（lstat）核验库目录、主库、已存在 WAL/SHM：目录必须是真目录，文件必须是普通文件，属主必须为当前有效用户，权限不得宽于 0700/0600。符号链接（含悬空链接）直接报错；主库不存在时也先检查已存在的 sidecar。仅解析祖先路径的系统别名（例如 macOS 的 `/var`），并比对库目录的设备号/inode；不解析主库或 sidecar 链接。新主库以 `create_new`、0600、`O_NOFOLLOW` 创建，所有 SQLite 打开都带 `SQLITE_OPEN_NOFOLLOW`。新增直接依赖 libc，仅用于当前有效 uid 和 O_NOFOLLOW；没有变动现有依赖版本。
+- **权限策略选择**：写入和只读打开都对已有宽权限路径直接拒绝，移除了存储层的 chmod。这取代上一节“写入打开自动收紧”的决定：检查版本前收紧权限会改动未来版本库，检查版本后再收紧又可能已生成宽权限 sidecar，因此无副作用拒绝最简单。只有主库已满足私有权限才进行版本预检，SQLite 新建 sidecar 时据此取得不宽于 0600 的权限。宽权限未来库在文件检查阶段报错，不查版本、不新建 sidecar、不改其内容或权限；权限合格的未来库仍通过读取实际 WAL 的只读预检返回 NewerSchema。
+- **第 3 条**：在 `Store::open` 接口文档中写明，并发首次初始化可能立即返回 SQLITE_BUSY，busy_timeout 不保证等待满预算，调用方须按可重试错误处理。新增一次由屏障同步两个线程首次打开同一路径的测试：至少一个成功，其余只允许 DatabaseBusy；全部结束后重新打开，确认 integrity_check 为 ok、schema_version 为 1、十张表齐全。未增加内部重试，也未修改锁等待预算。
+- **回归及 RED→GREEN**：仅新增指定的四项回归：主库链接（同一测试覆盖库目录链接）、sidecar 链接（WAL/SHM 与悬空链接）、已关闭且无 sidecar 的宽权限未来 WAL 库、并发首次初始化。前三项先在旧实现确认 RED，分别复现“只读接受主库链接”“WAL 链接目标被 chmod”“版本预检新建 WAL”，修复后定点测试全部 GREEN。链接回归检查拒绝后目标内容、权限和目录项不变；未来 WAL 回归检查主库字节/权限不变且未生成 sidecar。并发项是已有可重试行为的完整性回归，不伪造失败。
+- **既有测试调整**：将“写入收紧权限”测试改为逐项验证拒绝宽权限且不 chmod，保持目录/主库/WAL/SHM 的覆盖。未来版本和迁移回滚测试的手工夹具改为 0700/0600，以便通过文件安全门后继续验证原有版本错误、字节不变和回滚断言；宽权限未来库由新增回归独立覆盖。其他业务断言不变。
+- **规定验证**：所有命令在前台等待完成。`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo test --all-targets` 一次通过（17 项存储测试、4 项探针测试）；`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo clippy --all-targets -- -D warnings` 一次通过。此前仅运行上述新回归的定点 RED/GREEN；未扩展验证范围。所有材料均为隔离临时目录内的合成数据。
+- **范围与交付**：仅修改存储实现、store 测试、依赖声明/锁文件及本返工记录；未改 schema、业务流程、主仓库审查文件或用户真实配置。未合并 main、未推送，无需主控决定的新事项，交主控复审。
