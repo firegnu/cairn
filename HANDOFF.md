@@ -6,13 +6,15 @@
 
 - **阶段 1（能力实测）已完成**：门槛 A、B、C、F 在 Claude Code 2.1.289 和 Codex 0.160.0 上满足本次实测范围。报告：`docs/调研/第一阶段能力实测.md`；任务与审查记录：`docs/tasks/P1-*.md`。
 - DESIGN 已按实测结论修订（§8.3、§9.1、§10、§14、§15），并新增**暂存区写入设计**（§6.5）：`cairn save` 只写用户私有临时目录里的暂存文件，hook 和用户命令收进数据库。经独立交叉审查两轮复核通过。
+- **阶段 3 进行中**：3a hook 适配（`hook.rs`，`cairn hook claude|codex`）已合并并经交叉审查；阶段 1 探针已删除。阶段 3 的"建议验证"经用户同意写成验收条件。
 - **阶段 2（核心）已完成**：正式 crate 在 `crates/cairn`（用户定）。已合并：2a 存储（`store.rs`、`store/schema.rs`）、2b 作用域与 Git 事实（`scope.rs`、`facts.rs`）、2c adopt / save / 暂存区收取（`adopt.rs`、`save.rs`、`spool.rs`、`ingest.rs`、`cli.rs`）、2d 注入渲染与 `cairn show`（`render.rs`、`session.rs`）、2e 回合判定（`turn.rs`）、2f 用户命令（`commands.rs`）。全部经交叉审查，main 上 86 项测试通过。
 - 阶段 2 的任务书照用户同意，把实施计划的"建议验证"写成验收条件。
 
 ## 下一步
 
-1. 进入阶段 3（接入）：3a hook 适配 → 3b install / uninstall / status → 3c 安装方式与 README。开工前先问用户：阶段 3 的"建议验证"要不要当验收条件（阶段 2 的授权不覆盖阶段 3）。
-2. 3a 做完、hook 有了自己的夹具测试之后，建议删掉探针 `tools/cairn-probe`（问用户）。
+1. 派 3b install / uninstall / status（全部在隔离 HOME 下测，不写真实配置）。
+2. 之后 3c 安装方式与 README。
+3. 3c 后问用户：要不要在 p1-lab 里用真实 agent 做一次端到端冒烟测试，再进入阶段 4 试点。
 
 ## 悬而未决
 
