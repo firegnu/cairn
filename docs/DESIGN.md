@@ -114,6 +114,7 @@ cairn hook <agent> ──适配器翻译成标准事件──►  核心：判�
   - hook 路径下来源是 `claude:<session_id>`、`codex:<session_id>`。
   - SessionStart 注入时，把来源 ID 写进保存命令的示例，agent 原样照抄。
   - CLI 不带 `--source`，或者带的来源从来没出现过，就分配 `local:<ULID>`，并标为"关联不确定"。不会出现所有写入者都叫 `unknown` 的情况。
+  - save 不读数据库，判断不了"从来没出现过"。所以暂存文件只记"声明的来源"，这条规则在收取事务里执行（§6.5、§8.2）；分配的 `local:` ID 直接用该暂存操作的 `op_id`，重放时结果不变。
 
 ## 6. 存储
 
@@ -158,14 +159,21 @@ CREATE TABLE injections (                                               -- 用�
   PRIMARY KEY (source_id, record_id));
 CREATE TABLE confirmations (
   id INTEGER PRIMARY KEY, source_id TEXT NOT NULL, kind TEXT NOT NULL, -- saved / nothing_new
-  record_id TEXT, at TEXT NOT NULL);
+  op_id TEXT UNIQUE,                                                    -- 来自哪个暂存操作（§6.5）
+  record_id TEXT, at TEXT NOT NULL);                                    -- at = 暂存文件的 created_at
 CREATE TABLE turn_decisions (                                           -- 回合结束判定，保证每回合最多续跑一次
   source_id TEXT NOT NULL, turn_key TEXT NOT NULL,
-  outcome TEXT NOT NULL,                                                -- confirmed / continue_requested / unconfirmed_after_continue / skipped
+  outcome TEXT NOT NULL,                                                -- confirmed / continue_requested / unconfirmed_after_continue / pending_unprocessed / skipped
   at TEXT NOT NULL, PRIMARY KEY (source_id, turn_key, outcome));
 CREATE TABLE events (                                                   -- 观测到的事件，用于缺口报告
   id INTEGER PRIMARY KEY, source_id TEXT NOT NULL, kind TEXT NOT NULL, -- session_started / session_ended / turn_unconfirmed / save_rejected …
   at TEXT NOT NULL, detail TEXT);
+CREATE TABLE spool_ops (                                                -- 已处理的暂存操作，保证收取幂等（§6.5）
+  op_id TEXT PRIMARY KEY,
+  outcome TEXT NOT NULL,                                                -- ingested / rejected
+  source_id TEXT NOT NULL,                                              -- 按 §5 解析后的来源
+  record_id TEXT, reason TEXT,                                          -- 拒收原因，不含正文
+  processed_at TEXT NOT NULL);
 ```
 
 约束：
@@ -206,25 +214,38 @@ CREATE TABLE events (                                                   -- 观�
 
 用户 2026-10-05 选定的写入路线（第一阶段 C 补测通过；`--yolo` 只用于实测对照，D11 不变）。
 
-**位置**
-- macOS：`confstr(_CS_DARWIN_USER_TEMP_DIR)`（即 `getconf DARWIN_USER_TEMP_DIR`）下的 `cairn-spool/`。补测确认 Codex 默认沙箱里 shell 的 `$TMPDIR` 与它逐字相同，且该路径在沙箱可写范围内。取不到时退回 `$TMPDIR`。
-- 目录 0700，文件 0600；创建时如果目录已存在但属主不是当前用户或权限更宽，拒绝使用并报错。
+**位置与隔离**
+- 可信根：macOS 上取 `confstr(_CS_DARWIN_USER_TEMP_DIR)`（即 `getconf DARWIN_USER_TEMP_DIR`）。补测确认 Codex 默认沙箱里 shell 的 `$TMPDIR` 与它逐字相同，且在沙箱可写范围内。取不到时退回 `$TMPDIR`，同样要满足下面的可信根条件，否则报错。
+- 暂存区按目标状态库分命名空间：`<可信根>/cairn-spool/<ns>/`，`ns` 是"目标数据库路径（§6.1，按 `XDG_STATE_HOME` / `HOME` 推出，词法规范化，不要求已存在）"的 SHA-256 前 16 位十六进制。save、hook、用户命令用同一条规则算 `ns`，save 不需要打开数据库。暂存文件里也写上目标数据库路径。
+- 收取者只处理自己的 `ns` 目录，文件里的目标路径对不上就跳过，不读正文、不拒收、不删除。这样隔离 `XDG_STATE_HOME` 的测试和真实状态库互不干扰。
 - 首版只支持 macOS（D3：本机单机）。其他平台的暂存位置以后再定。
 
+**文件安全**
+- `cairn-spool/` 和 `<ns>/` 不存在就用 0700 创建；已存在的，用 `lstat` 检查：必须是真目录（不是符号链接）、属主是当前 uid、权限不宽于 0700。不满足就报错，不使用。
+- 之后的文件操作都相对已打开的 `<ns>` 目录句柄进行（`openat` / `renameat` / `unlinkat`），不再按完整路径重新解析，避免检查之后目录被换掉。
+- 收取的条目必须是普通文件（`O_NOFOLLOW` 打开后 `fstat` 核对类型和属主），符号链接和其他类型一律跳过，不读、不删。文件名里的 ID 必须和内容里的 ID 一致，否则拒收。
+
 **写入（`cairn save` 一侧）**
-- 一次 save 写一个文件：先写 `.<记录ID>.tmp`，`fsync` 后 `rename` 成 `<记录ID>.json`。收取方只认 `.json`，所以不会读到写了一半的文件。
-- 文件内容是一条完整的待入库记录：记录 ID（ULID，save 时生成）、来源、cwd、项目键、工作线、分支、kind、正文或 `nothing_new`、`supersedes` 列表、程序采集的事实、`created_at`、暂存格式版本号。
+- 一次 save 就是一个"暂存操作"，生成一个 ULID 作操作 ID（`op_id`）。有正文时它同时用作记录 ID。
+- 先用 `O_CREAT | O_EXCL | O_NOFOLLOW`、0600 创建 `.<op_id>.tmp`，写完 `fsync`，再改名成 `<op_id>.json`。改名用不覆盖已有文件的方式（`renameat` 之前目标名必须不存在；ULID 冲突时报错）。收取方只认 `.json`，不会读到写了一半的文件。
+- 文件内容：格式版本号、`op_id`、目标数据库路径、声明的来源（可能为空）、cwd、项目键、工作线、分支、kind、正文或 `nothing_new`、`supersedes` 列表、程序采集的事实、`created_at`。
 - save 不打开数据库：沙箱里连 WAL 模式的只读打开都要写 `-shm`，不可靠。
 
 **收取（hook 与用户命令一侧）**
-- 时机：SessionStarted 渲染之前、TurnEnded 判定之前、所有用户命令执行之前。SessionEnded 时限太短，不收取。
-- 每次收取处理全部 `.json` 文件，不只当前来源的；按文件名（ULID，大致按时间）顺序。单次有上限（建议 50 个文件或 300 ms），剩下的留给下一次。
-- 每个文件：解析 → 按 §8.2 的规则校验 → 在一个事务里写入记录、取代关系、确认 → 提交后删除文件。
-- 幂等：记录 ID 是主键，插入冲突则忽略（说明另一个并发收取已经写过），随后照样删除文件。两个 hook 同时收取同一个文件，结果只有一条记录。
-- 校验不通过（项目未采用、取代对象不合规、格式坏了）：不写记录，写一条 `save_rejected` 事件（来源、记录 ID、原因，不含正文），删除文件。
-- 数据库忙或出错：文件留在原处，下次再收；hook 照常按 §8.6 放行。
+- 入口顺序：hook 先看 `CAIRN_DISABLE`，再判断当前项目是否采用，两关都过了才收取（§8.1、§8.3）。用户命令执行之前也收取。SessionEnded 时限太短，不收取。
+- 一次收取只处理本 `ns` 下的 `.json`。TurnEnded 和 SessionStarted 先处理当前来源的文件，再处理其他文件；按文件名（ULID，大致按时间）顺序。单次有上限（建议 50 个文件或 300 ms），剩下的留给下一次。
+- 每个文件一个 `BEGIN IMMEDIATE` 事务，在事务里依次做：
+  1. 查 `spool_ops`：这个 `op_id` 已经处理过，就不再写任何东西，提交后删除文件。这覆盖了"两个 hook 同时收取同一个文件"和"提交后、删文件前进程退出又重放"两种情况，正文、`--nothing-new`、拒收三条路径都不会重复写。
+  2. 按 §5 解析来源（§8.2）。
+  3. 按 §8.2 校验：项目已采用、取代对象合规。校验和写入在同一个事务里，期间别的进程改不了采用状态或删记录。
+  4. 通过：写记录（有正文时）、取代关系、确认；不通过：写一条 `save_rejected` 事件（来源、`op_id`、原因，不含正文）。
+  5. 写一行 `spool_ops`，记下结果、解析出的来源、记录 ID 或拒收原因。
+  6. 提交，然后删除文件。文件已经被另一个收取者删掉，属于正常竞争，不算错误。
+- 数据库忙或出错：事务回滚，文件留在原处，下次再收；hook 照常按 §8.6 放行。
 
-**风险**：一直没有 hook 或用户命令运行时，文件留在临时目录里，可能被系统清理临时文件时删掉（R9）。`cairn status` 报告暂存区里待收取的文件数。
+**残留**
+- save 在改名之前异常退出，会留下含正文的 `.tmp`，收取流程不处理它。首版不自动清理（区分不了"已经死掉"和"还在写"），`cairn status` 分别报告待收取的 `.json` 和残留的 `.tmp`，并给出目录路径，由用户手动删除。
+- 一直没有收取时，文件留在临时目录里，可能被系统清理临时文件时删掉（R9）。
 
 ## 7. 命令接口草案
 
@@ -251,58 +272,60 @@ cairn status [--json]
 
 ### 8.1 SessionStarted
 
-1. 解析 stdin，判定项目。未采用：退出码 0，不输出任何内容。
-2. 收取暂存区（§6.5）。写入或更新来源，记一条 `session_started` 事件。
-3. 渲染注入文本（§9），把注入了哪些记录写进 `injections`。
-4. 按适配器约定输出（§10）。
-5. 不同的 start_kind：
+1. 设置了 `CAIRN_DISABLE=1`：退出码 0，不输出任何内容。
+2. 解析 stdin，判定项目。未采用：退出码 0，不输出任何内容，也不收取。
+3. 收取暂存区（§6.5）。写入或更新来源，记一条 `session_started` 事件。
+4. 渲染注入文本（§9），把注入了哪些记录写进 `injections`。
+5. 按适配器约定输出（§10）。
+6. 不同的 start_kind：
    - startup、clear：完整注入。
    - compact：完整注入一次，因为压缩后上下文只剩摘要。
    - resume、fork：只补本来源上次注入之后的新记录和现场变化，具体规则在阶段 2 定。
 
 ### 8.2 `cairn save`
 
-分两段：save 进程只做不需要数据库的部分；需要数据库的核对放在收取时（§6.5）。
+分两段：save 进程只做不需要数据库的部分；需要数据库的核对放在收取事务里（§6.5）。
 
 save 进程里：
 
 1. 判定项目键和工作线（调用 git，不读数据库）。不在 Git 里的目录按 §3 用当前目录。
 2. 校验正文（`--nothing-new` 时不需要正文）。不通过就返回非 0，不写暂存文件。
 3. 采集事实：HEAD、分支、本地上游 ref 及 ahead/behind、工作区里已暂存、未暂存、未跟踪文件的数量、采集时间。git 调用加 `--no-optional-locks`，避免在沙箱里试图写 `.git/index.lock`。
-4. 写暂存文件，输出一行 `saved …`。
+4. 写暂存文件（§6.5），输出一行 `saved …`。这里的 saved 表示"已暂存"，不表示已入库。
 
-收取时：
+收取事务里（§6.5 第 2–5 步）：
 
-5. 项目未采用：拒收（§6.5）。
-6. 核对每个 `supersedes` 对象，以下条件都满足才接受，任何一条不满足就整条拒收、不写入：
+5. 解析来源：声明的来源在 `sources` 里存在就用它；没有声明或从未出现过，按 §5 用 `local:<op_id>`，标为"关联不确定"。
+6. 项目未采用：拒收。
+7. 核对每个 `supersedes` 对象（用解析后的来源），以下条件都满足才接受，任何一条不满足就整条拒收、不写入：
    - 记录存在、没被删除；
    - 和当前记录同项目、同工作线；
    - 曾经注入给当前来源（`injections` 里有）。
-7. 一个事务里写入：记录、取代关系、`confirmations`。确认时间用暂存文件里的 `created_at`，不用收取时间。
+8. 写入记录、取代关系、`confirmations`（带 `op_id`）。确认时间用暂存文件里的 `created_at`，不用收取时间。
 
-拒收的结果只能在之后告诉模型：本回合的 TurnEnded 会把拒收原因放进续跑请求（§8.3）。项目未采用时 hook 不注入接续约定，模型一般不会调用 save；用户在未采用的项目里手动 save，会在下一次收取时被拒收，`cairn status` 能看到。
+拒收的结果只能在之后告诉模型，而且只在一种情况下告诉：本回合还有续跑机会、又没有有效确认时，TurnEnded 把拒收原因附在续跑请求里（§8.3 第 6 步）。续跑里的 save 被拒收、或者收取晚了才拒收，都不再续跑，只留下无正文的拒收记录，由 `cairn status` 和之后的注入呈现。项目未采用时 hook 不注入接续约定，模型一般不会调用 save；用户在未采用的项目里手动 save，会在下一次用户命令收取时被拒收，`cairn status` 能看到。
 
 ### 8.3 TurnEnded：回合结束判定
 
 按顺序执行，命中任何一步就停：
 
-0. 收取暂存区（§6.5）。收取失败不影响后面的步骤。
-1. 项目未采用，或者设置了 `CAIRN_DISABLE=1`：放行。第一阶段 H 已确认本机两种工具的 hook 能继承该变量；正式禁用逻辑仍由 cairn 实现。
-2. `continued`（`stop_hook_active`）为真：表示 Stop hook 触发的续跑，该字段不标识具体是哪一个 hook。写入 `confirmed` 或 `unconfirmed_after_continue`，然后放行。绝不再续跑第二次。
-3. 在"本回合的确认窗口"里查找这个来源的确认：
+1. 设置了 `CAIRN_DISABLE=1`：放行。第一阶段 H 已确认本机两种工具的 hook 能继承该变量；正式禁用逻辑仍由 cairn 实现。
+2. 项目未采用：放行，不收取、不记录。
+3. 收取暂存区（§6.5），先处理当前来源的文件。收取失败不影响后面的步骤。
+4. `continued`（`stop_hook_active`）为真：表示 Stop hook 触发的续跑，该字段不标识具体是哪一个 hook。窗口内有已提交的确认就写 `confirmed`，否则写 `unconfirmed_after_continue`，然后放行。绝不再续跑第二次。
+5. 在"本回合的确认窗口"里查找这个来源**已提交**的确认（`confirmations`）：
    - 适配器接入 UserPromptSubmit，翻译成 TurnStarted，窗口从本回合开始算起；
    - 没有时，从上一次 TurnEnded 判定算起；
    - 再没有，就从会话开始算起。
    - 第一阶段 B 已确认普通用户提示的 UserPromptSubmit 带回合 ID，并与后续 Stop 对应；续跑没有额外的 UserPromptSubmit。缺事件或字段时仍保留上述降级窗口。
-   - 数据库里的确认之外，暂存区里还没收进来的、属于这个来源且在窗口内的文件也算确认（收取因数据库忙而失败时用得上）。
-4. 找到确认：写入 `confirmed`，放行。
-5. 没找到：先尝试插入 `(source, turn_key, continue_requested)`。
-   - 插入成功，就返回续跑请求，原因见 §9.3。窗口内这个来源有 `save_rejected` 事件时，原因里附上拒收原因（不含正文），请模型改正后重新 save。
-   - 唯一键冲突，说明是重复事件，直接放行。
-   - 没有 turn_key 时，用"来源 + 窗口起点"作为键。
-6. 任何错误或超时：放行，并把错误记到 cairn 自己的错误日志。
+   - 找到：写入 `confirmed`，放行。
+   - 暂存区里还没处理的文件**不算确认**：它们还没过校验，可能会被拒收。
+6. 没找到已提交的确认：
+   - 如果这个来源在窗口内还有没处理完的暂存文件（数据库忙、单次上限用完），结果未知：写 `pending_unprocessed`，放行，不续跑。这些文件之后照常收取或拒收。
+   - 否则先尝试插入 `(source, turn_key, continue_requested)`。插入成功，就返回续跑请求，原因见 §9.3；窗口内这个来源有 `save_rejected` 事件时，原因里附上拒收原因（不含正文），请模型改正后重新 save。唯一键冲突，说明是重复事件，直接放行。没有 turn_key 时，用"来源 + 窗口起点"作为键。
+7. 任何错误或超时：放行，并把错误记到 cairn 自己的错误日志。
 
-**这一步保证的**：每个回合最多续跑一次；同一事件重复送达，不会重复保存或续跑。
+**这一步保证的**：每个回合最多续跑一次；同一事件重复送达，不会重复保存或续跑；没过校验的保存不会被当成确认。
 
 **不做的假设**：不假设 hook 回调的先后顺序，也不假设同一会话的 hooks 一定串行。官方文档写明，两种工具都会并发执行匹配到的 hooks。
 
@@ -363,7 +386,7 @@ save 进程里：
 cairn：本回合没有收到接续确认。请判断本回合是否产生了需要下一次会话接续的内容：有则 `cairn save --source <ID>`，没有则 `cairn save --source <ID> --nothing-new`。之后把你上一条最终回答原样再给出一次，不要提及本提示。
 ```
 
-"原样再给出一次"是为了保住"最后一行写 DONE""严格 JSON"这类输出约定，因为续跑会产生一条新的最后回复。这种做法是否有效、代价多大，要在第一阶段观察（风险 R4）。
+"原样再给出一次"是为了保住"最后一行写 DONE""严格 JSON"这类输出约定，因为续跑会产生一条新的最后回复。第一阶段 G 在 JSON 和末行 DONE 两类样例上验证了这种做法；续跑原因里不要额外要求某种结束标记（风险 R4）。
 
 ## 10. 适配器与安装
 
@@ -446,7 +469,7 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 - cairn 不连网。
 - 数据库和日志文件权限为 0600。
 - 删除时用 `secure_delete`，并清理 WAL，避免正文残留。
-- 暂存文件里有正文，收取前一直留在用户私有临时目录（0700 目录、0600 文件），收取后立即删除。删除暂存文件只是普通 unlink，不保证磁盘上不留痕迹；误存敏感内容时，`cairn delete` 只能处理已经入库的记录，还在暂存区的文件由用户手动删除（`cairn status` 给出路径）。
+- 暂存文件里有正文，收取前一直留在用户私有临时目录（0700 目录、0600 文件），收取后立即删除。删除暂存文件只是普通 unlink，不保证磁盘上不留痕迹；save 异常退出还可能留下含正文的 `.tmp`（§6.5）。误存敏感内容时，`cairn delete` 只能处理已经入库的记录，还在暂存区的 `.json` 和残留的 `.tmp` 由用户手动删除（`cairn status` 给出路径和数量）。
 - 只有在用户明确确认后才修改用户配置，改之前先备份。
 - 开发和测试只用合成材料，不碰真实数据（见 AGENTS.md）。
 
@@ -454,12 +477,13 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 
 **做**：
 - 一个 crate 和 CLI；
-- 两种 agent 的 SessionStart、Stop、SessionEnd hooks；第一阶段证明需要的话，再加上回合起点事件；
+- 两种 agent 的 SessionStart、UserPromptSubmit（回合起点）、Stop、SessionEnd hooks，Codex 另接 Interrupt（只记观测）；
 - adopt、受限的 save、回合确认与续跑一次；
 - 多来源有界注入、有限制的取代、现场对比、按观测报告缺口；
 - 用户命令：list、show、correct、retract、restore、delete、export；
 - install、uninstall、status；
-- `CAIRN_DISABLE` 开关，以第一阶段确认可行为前提。
+- `CAIRN_DISABLE` 开关（第一阶段 H 已确认 hook 能继承环境变量）；
+- save 的暂存区与收取（§6.5）。
 
 **不做**：
 - 在回答里加记忆块或标记；扩大沙箱；
@@ -484,7 +508,7 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 | R6 | 非交互的权限和注入表现不能直接由交互结果推定 | H 已证实环境继承，可实现 `CAIRN_DISABLE=1` 按次关闭；A 的 exec 复述有一次失败、一次成功。用户 2026-10-05 决定：非交互的注入表现记为已知限制，不挡阶段 2，不再追查；是否默认排除仍待定（§15） |
 | R7 | 被委派 agent 的会话也会每回合确认，增加成本 | H 已通过 `corral start --env CAIRN_DISABLE=1` 的继承实测；实现禁用后是否默认这样启动，仍由用户决定 |
 | R8 | 模型可能写错、漏写，或者错误地声明取代 | 用户可以更正、撤回、恢复；注入时保留折叠提示 |
-| R9 | 暂存文件在收取前可能被系统清理临时目录时删掉；save 当时报了成功，拒收也只能事后告知 | 每个 hook 和用户命令都先收取，正常使用下暂存时间很短；拒收原因随续跑请求告诉模型（§8.3）；`cairn status` 报告待收取数量 |
+| R9 | 暂存文件在收取前可能被系统清理临时目录时删掉；save 报的 saved 只表示已暂存，拒收只能事后告知；异常退出的 `.tmp` 残留正文 | 已采用项目的 SessionStarted、TurnEnded 和所有用户命令都先收取，正常使用下暂存时间很短；还有续跑机会时拒收原因随续跑请求告诉模型（§8.2、§8.3）；`cairn status` 报告待收取和残留数量 |
 
 ## 15. 待定问题
 
