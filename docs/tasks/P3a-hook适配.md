@@ -80,3 +80,11 @@
 新增 Claude / Codex 两项回归，均经隔离 `cli::run_at` 先采用项目、记录 UserPromptSubmit，再分别送缺字段和错误字符串类型的 Stop，核对输出为空串 / `{}`、`turn_decisions` 始终为 0、每次追加一行固定错误日志且不含合成隐私标记。修复前定向运行两项均 RED：实际错误返回 block；修复后两项均 GREEN。
 
 验证范围仅为上述回归及指定检查，所有 Cargo 命令使用共用 `CARGO_TARGET_DIR` 并在前台等待结束：`cargo test -p cairn --test hook stop_requires_continuation_marker`（RED 2 失败，修复后 GREEN 2 通过）；`cargo test --all-targets` 跑一次通过（91 项）；`cargo clippy --all-targets -- -D warnings` 跑一次通过。未改核心模块、设计、真实配置或数据，主仓库交叉审查文件只读；仅提交到 `p3a-hook`，不合并、不推送。无新增待主控决定事项。
+
+## 主控审查
+
+2026-10-05，cairn/main。结论：通过，已合并。
+- 初审：没动核心模块和 DESIGN；验收 4 条与隐私标记检查都有测试；探针已从 workspace 删除；测试与 clippy 通过；真实临时目录无 `cairn-spool`。
+- 同意 Codex 的 Interrupt 只忽略、不记录不续跑。
+- 交叉审查（`docs/tasks/P3a-hook适配-交叉审查.md`）：必须改 1 条（Stop 缺 `stop_hook_active` 时被当成 false 而误续跑），返工 2e55fbd 改为放行并记无正文日志，复核"可以合并"。
+- 合并后 main 上全量测试与 clippy 通过。
