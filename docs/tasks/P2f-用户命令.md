@@ -108,3 +108,10 @@ restore 的排序不再只依赖当前墙钟：在 IMMEDIATE 事务中读取目�
 随后 `cargo test --all-targets` 和 `cargo clippy --all-targets -- -D warnings` 各运行一次，均通过；全量 86 项（cmds 13、render/session 12、save 19、scope/facts 5、store 17、turn 16、probe 4）。渲染固定样例逐字比对通过，`tests/render_session.rs` 及期望文本没有修改。所有命令前台等待完成，Cargo 使用指定共享 target；测试仍使用临时 HOME / XDG_STATE_HOME 和显式临时暂存可信根，未扩大验证范围。
 
 **范围**：本轮仅修改授权的 `render.rs` 动作排序、`commands.rs`、`tests/cmds.rs` 和本任务文件，DESIGN 来自合并 main。未改其他禁改模块或真实配置与数据，未写主仓库审查文件、未委派 agent、未合并回 main、未推送。没有需要主控另作决定的事项。
+
+## 主控审查
+
+2026-10-05，cairn/main。结论：通过，已合并。
+- 初审：没动禁改模块；验收 5 条有测试；测试与 clippy 通过。
+- 交叉审查（`docs/tasks/P2f-用户命令-交叉审查.md`）：必须改 2 条（二级更正不显示；restore 按墙钟排序会假报成功）。主控决定：correct 只允许以 checkpoint 为目标（DESIGN §8.5，afd2212）。第一轮返工后复核仍有 1 条（抬高时间的 restore 会撤销之后的新取代），主控从根上改为取代、撤回、恢复按入库顺序（rowid）判定、cairn 不执行 VACUUM（DESIGN §6.2，a520af2），授权改 render.rs 的排序；第二轮返工 d914400 后复核"可以合并"，渲染固定样例期望未改。
+- 合并后 main 上全量测试与 clippy 通过。
