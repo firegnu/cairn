@@ -52,3 +52,34 @@
 
 ## 做完
 在本文件末尾追加「## 完成记录」（在你的分支里提交）：做了什么、验证了什么、拿主意的地方、没做的事，各几句话。回复里只写这几样，加上有没有要主控决定的事。命令都在前台跑完，全部做完后，回复最后一行写 DONE。
+
+## 完成记录
+
+2026-10-05，cairn/dev-render（Codex），分支 `p2d-render`。
+
+**做了什么**：新增 `render.rs`、`session.rs`，在 `lib.rs` 声明，并在 `cli.rs` 接入 `cairn show [--json]`。渲染按 §9.1 顺序输出抬头、本工作线各来源最新可见记录、折叠提示、现场对比、其他工作线摘要和未显示来源数。删除记录不显示；更正附最新可见一条并注明来源和时间；恢复撤销针对原记录的较早取代 / 撤回，之后的新取代 / 撤回仍生效。同时间用记录 ID 稳定排序。现场对比以本工作线最新可见且带事实的 checkpoint 为基线，通过 `StoredFacts` 读取持久化事实，再调用原有 `Git::compare`，没有改地基模块。
+
+`session::start(&SessionStarted, database, root)` 接收已经解析的禁用状态、agent、session_id、cwd、start_kind 和当前时间；数据库和可信暂存根显式传入。禁用先退出；库不存在 / 项目未采用时不建库、不收取、不登记；通过采用检查后按当前来源优先收取，再在同一个 IMMEDIATE 事务内登记来源、写 `session_started`、渲染和写 `injections`。新来源为 hook 关联，已有来源只更新 `last_seen`；注入失败回滚这一事务，先前独立提交的暂存收取不回退。错误返回调用者，未来阶段 3 hook 入口负责按 §8.6 记日志并放行，不在本任务实现适配器。
+
+startup / clear / compact / other 完整渲染；resume / fork 只补本来源尚未注入的内容与现场对比，不重复折叠提示和其他工作线。原记录已注入之后的新更正，注明目标 ID 单独补入，不重复原正文。抬头按 §9.2 原文填来源 ID，空项目只返回抬头。`show` 使用同一渲染函数，来源位置为 `<本来源ID>`；已有库先收取，再在读取事务中渲染，不登记调用者、不写 `injections`。无库先经 `Store::open_read_only` 返回“尚无数据”，不打开暂存区、不建库；JSON 无库为 `{"status":"no_data"}`，有库为 `text`、`record_ids`、`omitted_sources`。
+
+**验证了什么**：新增 `crates/cairn/tests/render_session.rs`，共 10 项测试，覆盖四条验收及禁用 / 未采用、resume / fork 要求。有效 RED→GREEN 包括：原 CLI 不识别 show；固定样例缺少渲染；输出超出预算；采用项目没有注入和登记；较新的隐藏记录未标出最后落盘时间；resume 漏掉后来的更正。实现过程中一次 Rust 类型错误、一次夹具真实时间早于合成记录时间、一次预算夹具的容量估算错误，不计作 RED。
+
+直接相关边角验证：
+
+- 固定期望文本逐字比对多来源、同来源旧记录、取代与恢复、撤回与恢复、删除隐藏、最新更正、缺口统计、会话结束、纯 CLI 来源、其他工作线不存在、Git 工作区新增文件；时间来自固定入参。
+- 中文按 `chars().count()` 计预算、正好等于预算、较早来源完整正文→停点→查看引用、引用也放不下时的来源计数。长停点仍超预算时只留引用，未显示正文的记录不写入 injections，下一次 resume 仍能补入。
+- 禁用在 cwd / 数据库 / 暂存区操作之前生效；未采用时不收取；收取发生在新会话来源登记之前，原来未知的声明来源按现有 2c 规则落为 local 来源。
+- show JSON 字段与注入相同记录，show 会收取暂存正文，但不额外登记来源 / 事件 / injections；无库的普通和 JSON show 不建目录。
+- resume / fork 去重，fork 使用新来源 ID 时只按自己的 injections 判定；clear / compact / other 完整补入；空项目精确抬头；既有来源 first_seen 保留、last_seen 更新。
+- 合成 SQLite 触发器使第二条 injections 写入失败，检查来源 / 事件 / injections 无部分提交；移除故障后成功，预算引用仍不记为正文注入。
+- 事件统计仅数最后一个 checkpoint 之后的 `unconfirmed_after_continue`，不把 `pending_unprocessed` 算作未确认；最新 checkpoint 被撤回时仍指出真实最后落盘 ID / 时间。
+- 自动文字遵守措辞红线，历史正文内出现相同词语仍原样保留（见下方用户确认）。
+
+所有命令均在前台等待完成，Cargo 使用指定共享编译目录。`cargo test --all-targets` 一次通过：新增渲染 / 会话 10、原 save 19、scope/facts 5、store 17、probe 4，共 55 项。`cargo clippy --all-targets -- -D warnings` 首次指出测试断言不必要的 `clone`，按建议改为 `std::slice::from_ref`，重跑通过；没有放宽断言或 lint。格式化和 `git diff --check` 通过。测试全部使用合成材料、临时 HOME / XDG_STATE_HOME、临时 Git 仓库和显式临时暂存可信根，没有在真实暂存根建 cairn-spool。
+
+**拿主意的地方**：删除记录完全隐藏，不输出墓碑。预算默认常量 6,000，库级渲染可传预算；先从旧到新将正文缩为停点，再从旧到新缩为引用；仍放不下时省略较早的其他线摘要、折叠提示和来源引用，保留未显示的本工作线来源数及 `cairn list --line`。不会切断 UTF-8、抬头规则或现场对比；连固定内容也容不下的自定义预算返回错误。只有实际带内容输出的 checkpoint、更正和其他线摘要进入 `record_ids` / injections；折叠提示和纯查看引用不算注入。记录时间统一沿用 UTC RFC 3339 毫秒格式，过去时长用传入时钟计算，未来时间显示“不到 1 分钟前”。
+
+用户在本轮明确确认措辞范围：**“限定自动生成文字，正文原样保留”**。因此禁用词检查针对 cairn 自动叙述，不审改历史正文，也不把历史中的模型判断变成程序事实。未修改 DESIGN 的既定行为。
+
+**没做的事**：未实现回合判定、其他用户命令、hook JSON 入口、错误日志入口或 install；没有修改 store / schema / scope / facts / spool / ingest / save、HANDOFF、真实配置，未访问真实 cairn 数据或真实会话。未启动 / 委派 agent，未合并 main、未推送。查看 / 恢复提示中的 `show <ID>`、`list --line`、`restore` 命令由 2f 接续实现。没有需要主控决定的事项；交叉审查与合并留给主控。

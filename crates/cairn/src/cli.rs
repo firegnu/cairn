@@ -17,6 +17,10 @@ pub struct Cli {
 pub enum Command {
     Adopt,
     Unadopt,
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
     Save {
         #[arg(long)]
         source: Option<String>,
@@ -64,6 +68,42 @@ pub fn run_at(
     let git = crate::scope::Git::default();
     let scope = git.resolve(cwd)?;
     match cli.command {
+        Command::Show { json } => {
+            let existing = crate::store::Store::open_read_only(
+                database,
+                crate::store::BusyTimeout::UserCommand,
+            )?;
+            if existing.is_none() {
+                return Ok(if json {
+                    "{\"status\":\"no_data\"}"
+                } else {
+                    "尚无数据"
+                }
+                .into());
+            }
+            drop(existing);
+            let spool = crate::spool::Spool::open(root, database)?;
+            let mut store =
+                crate::store::Store::open(database, crate::store::BusyTimeout::UserCommand)?;
+            crate::ingest::ingest(&mut store, &spool, None)?;
+            let tx = store.transaction(rusqlite::TransactionBehavior::Deferred)?;
+            let rendered = crate::render::render(
+                &tx,
+                &crate::render::Request {
+                    scope: &scope,
+                    source_id: "<本来源ID>",
+                    now: chrono::Utc::now(),
+                    incremental: false,
+                    budget: crate::render::CHARACTER_BUDGET,
+                },
+            )?;
+            tx.commit()?;
+            if json {
+                Ok(serde_json::to_string(&rendered)?)
+            } else {
+                Ok(rendered.text)
+            }
+        }
         Command::Save {
             source,
             nothing_new,
