@@ -27,7 +27,7 @@
   - `continued` 为真：窗口内有已提交确认写 `confirmed`，否则写 `unconfirmed_after_continue`，放行，绝不再续跑；
   - 只认**已提交**的 `confirmations`；窗口按 §8.3 第 5 步和"回合起点的存法"（最近一条 `turn_started`，否则上一次 TurnEnded 判定，否则会话开始）；
   - 没找到确认：用 2c 的查询看这个来源窗口内有没有未处理暂存文件，"有"或"未知"都写 `pending_unprocessed` 并放行，不续跑；
-  - 否则插入 `(source, turn_key, continue_requested)`：插入成功返回续跑，原因用 §9.3 原文（填来源 ID），窗口内有 `save_rejected` 事件时附上拒收原因（不含正文）；唯一键冲突说明是重复事件，放行；没有 turn_key 时用"来源 + 窗口起点"作键。
+  - 否则插入 `(source, turn_key, continue_requested)`：插入成功返回续跑，原因用 §9.3 原文（填来源 ID），窗口内有 `save_rejected` 事件时附上拒收原因（不含正文）；唯一键冲突说明是重复事件，放行；没有 turn_key 时不续跑、写 `skipped`（见 DESIGN §8.3 修订）。
 - **SessionEnded**（§8.4）：写一条 `session_ended` 事件，不收取、不渲染，尽快返回。
 - **失败策略**（§8.6）：对外提供的入口在任何错误时都返回"放行"，同时把错误交给调用方（阶段 3 负责写 `errors.log`）。
 - 判定逻辑写成纯函数（输入是已查到的事实，输出是决定），数据库读写放在外面一层，方便测试。
@@ -38,7 +38,7 @@
 1. 同一事件重复送达：同一个 TurnEnded 送两次，不会续跑两次。
 2. 乱序到达：例如 TurnEnded 先于 TurnStarted、或两个 TurnEnded 交错，结果仍满足"每回合最多续跑一次"，不出错。
 3. 续跑后再次 Stop（`continued` 为真）：不再续跑，正确写 `confirmed` 或 `unconfirmed_after_continue`。
-4. 没有 turn_key：按"来源 + 窗口起点"去重，仍然每回合最多续跑一次。
+4. 没有 turn_key：不续跑，写 `skipped` 并放行（DESIGN §8.3 已按 2e 发现的漏洞修订）；同一事件重复送达也不续跑。
 5. hook 出错时放行：数据库忙、数据库出错等情况下入口返回"放行"并带回错误。
 6. 每个回合最多续跑一次（贯穿以上各条）。
 
