@@ -32,5 +32,5 @@
   - 三条信任记录：`~/.claude.json` 里 `p1-lab/claude-repo` 的项目条目；`~/.codex/config.toml` 里 `p1-lab/codex-repo` 的项目信任和 SessionStart hook 的信任记录。
 - 已知限制（用户决定不挡阶段 2）：Codex 非交互 `exec` 有一次没复述注入内容，原因未查。
 - 是否默认对被委派 agent / 脚本会话关闭 cairn（`CAIRN_DISABLE=1`），等试点后由用户决定。
-- 远程仓库：用户暂不建。
+- 远程仓库：用户 2026-10-05 建了 public 仓库 github.com/firegnu/cairn（origin）；按 AGENTS.md，之后每次合并后推送到 origin。
 - Saddle `t49-memory-design` 分支上的 T49 文档，"同仓、随 Saddle 发布"和"文件存储"两处已被本仓库 D1、D3 取代；Saddle 那边要不要补说明，由用户决定。
