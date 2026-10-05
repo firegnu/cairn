@@ -98,3 +98,10 @@
 - **R3**：保持现有清理行为：删除最后一条 cairn entry 时，清理随之为空的事件数组、hooks 对象、allow 数组和 permissions 对象，不区分空容器原先存在还是安装新增。因此安装/卸载的“等价”指 hook 和权限语义等价，不保证原有空容器的结构往返不变。已补审查中的 `{"hooks":{"Stop":[]},"permissions":{"allow":[]},"theme":"dark"}` 往返用例，断言最终仅剩 `{"theme":"dark"}`；没有 cairn 条目时直接卸载仍保留原有空容器。
 - **验证**：R1 首次因 status 将复合命令认成自身 handler 而失败，R2 首次因 install 接受重复键而失败，修复后转绿；R3 为既有行为刻画，不制造 RED。`cargo test --test install review_r` 的 3 项回归通过，均使用已有隔离 HOME / XDG / 工具配置目录夹具，未执行合成 hook 命令。最终 `CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo test --all-targets` 一次通过，共 102 项；`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo clippy --all-targets -- -D warnings` 一次通过。所有命令均等待前台进程结束。
 - **范围**：仅修改命令认领、安装 JSON 检查、上述回归和本记录；无新依赖，不改变 R3 清理行为、DESIGN 或已确认的 SQLite 辅助文件边界。未读写真实配置/会话/数据，未运行真实 agent，未修改主仓库审查文件，未合并或推送；无新增待主控决定事项。
+
+## 主控审查
+
+2026-10-05，cairn/main。结论：通过，已合并。
+- 初审：验收 5 条有测试；测试与 clippy 通过；核对真实环境：`~/.local/share/cairn` 不存在，真实 Claude / Codex 配置里没有 cairn 条目（真实 `~/.claude/settings.json` 的修改时间早于本次开发，非本任务所致）。
+- 交叉审查（`docs/tasks/P3b-安装-交叉审查.md`）：必须改 2 条（复合命令被误认领删除；重复 JSON 键写回后改变无关设置），建议改 1 条（空容器清理边界，主控决定保持现有行为并写明）。返工 42cdd9f 后复核"可以合并"。
+- 合并后 main 上全量测试与 clippy 通过。
