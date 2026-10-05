@@ -44,3 +44,41 @@
 
 ## 做完
 在本文件末尾追加「## 完成记录」（在你的分支里提交）：做了什么、走查的每一步与结果、拿主意的地方、没做的事，各几句话。回复里只写这几样，加上有没有要主控决定的事。命令都在前台跑完，全部做完后，回复最后一行写 DONE。
+
+## 完成记录
+
+### 做了什么
+
+- 新建仓库根 `README.md`，用中文说明 cairn 的用途、源码安装、Claude Code/Codex 接入与备份、Codex `/hooks` 信任、项目采用、日常命令、数据位置、`CAIRN_DISABLE=1`、卸载和数据删除。
+- README 末尾加入隔离走查命令，明确设置临时 `HOME`、XDG 目录、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`TMPDIR`，并用 `cargo install --root` 安装。
+
+### 走查步骤与结果
+
+在全新的临时目录 `/tmp/cairn-readme.5VRWxY` 中，使用隔离配置目录并将共享编译目录设为 `/Users/firegnu/Developer/personal_projs/cairn-worktrees/.target`，按 README 顺序执行：
+
+1. `cargo install --path crates/cairn --root "$test_root/cargo"`：成功安装 `cairn`。
+2. `cairn install --agent claude --dry-run`：成功，显示 Claude `settings.json`、hook 和 save 权限改动。
+3. `cairn install --agent codex --dry-run`：成功，显示 Codex `hooks.json` 和 hook 改动。
+4. `cairn install --agent claude --yes`：成功，创建稳定软链接并写入隔离 Claude 配置。
+5. `cairn install --agent codex --yes`：成功，写入隔离 Codex 配置，并提示到 `/hooks` 审核信任。
+6. 在临时 Git 仓库执行 `cairn adopt`：成功，项目显示为已采用。
+7. `printf '%s\\n' '## 停点' '完成隔离走查示例。' | cairn save`：成功，生成一条记录。
+8. `cairn show`：成功显示注入抬头和刚保存的记录。
+9. `cairn list`：成功列出该记录。
+10. `cairn status`：成功报告两个 agent 已安装、稳定软链接有效、项目已采用、暂存区无待收取或残留文件。
+11. `cairn uninstall --agent claude --yes`：成功，备份并清空隔离 Claude 配置。
+12. `cairn uninstall --agent codex --yes`：成功，备份并清空隔离 Codex 配置。
+
+### 拿主意的地方
+
+- 按设计和实际帮助保留稳定命令路径、配置备份、Codex `/hooks` 信任提醒，以及 `cairn save` 通过标准输入接收正文的写法。
+- 数据删除只在 README 中说明，不在走查中执行删除；走查严格覆盖任务要求的命令顺序。
+
+### 没做的事
+
+- 未修改任何 Rust 代码，未运行真实 Claude 或 Codex，未写入真实 HOME 或真实 agent 配置。
+- 未运行 `cargo test`；任务明确只要求隔离走查和 `git diff --check`。
+
+### 主控决定
+
+- 无。
