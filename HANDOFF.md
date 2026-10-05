@@ -4,22 +4,23 @@
 
 ## 现在在哪
 
-- 设计已定（`docs/DESIGN.md` §2，D1–D12），来历见 `docs/背景与决策记录.md`。只有本地 git，没有远程仓库。
-- 阶段 1（能力实测）进行中：
-  - **探针程序已完成并合并**：仓库根是虚拟 Cargo workspace，唯一成员 `tools/cairn-probe`（阶段 1 结束后删除）。用法和输出约定见 `docs/tasks/P1-探针程序.md`。
-  - 实测本身还没开始。
+- **阶段 1（能力实测）已完成**：门槛 A、B、C、F 在 Claude Code 2.1.289 和 Codex 0.160.0 上满足本次实测范围。报告：`docs/调研/第一阶段能力实测.md`；任务与审查记录：`docs/tasks/P1-*.md`。
+- DESIGN 已按实测结论修订（§8.3、§9.1、§10、§14、§15），并新增**暂存区写入设计**（§6.5）：`cairn save` 只写用户私有临时目录里的暂存文件，hook 和用户命令收进数据库。经独立交叉审查两轮复核通过。
+- 仓库现在只有探针 `tools/cairn-probe`（虚拟 workspace 唯一成员），正式 `cairn` crate 还没开始写。
 - 没有开着的 dev / test agent；没有未清理的 worktree 或分支。
 
 ## 下一步
 
-1. 派"实测与报告"任务：按 `docs/实施计划.md` 阶段 1 的 A–H 项，在本机真实 Claude Code 和 Codex 上用 `cairn-probe` 实测，产出 `docs/调研/第一阶段能力实测.md` 并修订 DESIGN §8.3、§9.1、§10、§14、§15。
-   - 只用会话级参数或临时目录的项目级配置注入 hooks，不改用户真实配置。
-   - 有几项需要用户在旁点信任（Claude 目录信任、Codex 项目与 hook 信任）；实测结束告诉用户如何清除这些信任记录。
-2. A、B、C、F 在两种工具上都通过后，才进入阶段 2。C 项（写入传输）有工具做不到，就停下向用户报告。
+1. 开阶段 2（核心）。按 `docs/实施计划.md` 阶段 2 拆任务；地基先串行：2a 存储（含 `spool_ops`、`confirmations.op_id`），与 2b 作用域与事实可以并行。2c 的 save 按 DESIGN §6.5 / §8.2 两段式实现。
+2. 开工前先定正式 `cairn` crate 在 workspace 里的位置（根 package 还是 `crates/cairn`），以及探针什么时候删。
 
 ## 悬而未决
 
-- `docs/DESIGN.md` §15 的待定问题，大多等阶段 1 结论。
+- **实测遗留物，删不删由用户决定**（详细位置见报告 §12）：
+  - `cairn-worktrees/p1-lab/` 实验目录；
+  - 私有临时目录下的 `cairn-probe-spool-p1-*` 子目录；
+  - 三条信任记录：`~/.claude.json` 里 `p1-lab/claude-repo` 的项目条目；`~/.codex/config.toml` 里 `p1-lab/codex-repo` 的项目信任和 SessionStart hook 的信任记录。
+- 已知限制（用户决定不挡阶段 2）：Codex 非交互 `exec` 有一次没复述注入内容，原因未查。
+- 是否默认对被委派 agent / 脚本会话关闭 cairn（`CAIRN_DISABLE=1`），等试点后由用户决定。
 - 远程仓库：用户暂不建。
-- Saddle `t49-memory-design` 分支的 T49 文档里，"同仓、随 Saddle 发布"和"文件存储"两处已被本仓库 D1、D3 取代；Saddle 那边要不要补说明，由用户决定。
-- 正式 `cairn` crate 放在 workspace 的哪个位置（根 package 还是 `crates/cairn`），阶段 2 开工时定。
+- Saddle `t49-memory-design` 分支上的 T49 文档，"同仓、随 Saddle 发布"和"文件存储"两处已被本仓库 D1、D3 取代；Saddle 那边要不要补说明，由用户决定。
