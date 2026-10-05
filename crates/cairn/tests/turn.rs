@@ -93,6 +93,7 @@ impl Fixture {
 
     fn context<'a>(&'a self, at: &'a str) -> Context<'a> {
         Context {
+            command: "/synthetic/cairn/bin/cairn",
             database: &self.database,
             spool_root: self.root.path(),
             project_key: &self.project,
@@ -165,7 +166,7 @@ fn duplicate_turn_end_requests_continuation_only_once() {
     let first = turn::turn_ended(f.context(END), Some("turn-1"), false);
     assert!(first.errors.is_empty());
     assert_eq!(first.action, Action::Continue {
-        reason: "cairn：本回合没有收到接续确认。请判断本回合是否产生了需要下一次会话接续的内容：有则 `cairn save --source codex:synthetic`，没有则 `cairn save --source codex:synthetic --nothing-new`。之后把你上一条最终回答原样再给出一次，不要提及本提示。".into(),
+        reason: "cairn：本回合没有收到接续确认。请判断本回合是否产生了需要下一次会话接续的内容：有则 `/synthetic/cairn/bin/cairn save --source codex:synthetic`，没有则 `/synthetic/cairn/bin/cairn save --source codex:synthetic --nothing-new`。之后把你上一条最终回答原样再给出一次，不要提及本提示。".into(),
     });
     allowed(turn::turn_ended(
         f.context("2026-10-05T00:02:01.000Z"),

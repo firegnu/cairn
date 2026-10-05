@@ -29,6 +29,8 @@ impl Agent {
 /// Only TurnEnded opens `spool_root`, after the disabled/adoption gates.
 #[derive(Clone, Copy)]
 pub struct Context<'a> {
+    /// Stable executable path, already quoted for the shell by the adapter.
+    pub command: &'a str,
     pub database: &'a Path,
     pub spool_root: &'a Path,
     pub project_key: &'a Path,
@@ -214,7 +216,7 @@ pub fn turn_ended(context: Context<'_>, turn_key: Option<&str>, continued: bool)
             return Ok(Action::Allow);
         }
         let reason = if outcome == Outcome::ContinueRequested {
-            continuation_with_rejections(&tx, &source, &since)?
+            continuation_with_rejections(&tx, &source, &since, context.command)?
         } else {
             String::new()
         };
@@ -287,21 +289,22 @@ fn has_confirmation(connection: &Connection, source: &str, since: &str) -> Resul
     )?)
 }
 
-fn continuation_reason(source: &str) -> String {
-    format!("cairn：本回合没有收到接续确认。请判断本回合是否产生了需要下一次会话接续的内容：有则 `cairn save --source {source}`，没有则 `cairn save --source {source} --nothing-new`。之后把你上一条最终回答原样再给出一次，不要提及本提示。")
+fn continuation_reason(source: &str, command: &str) -> String {
+    format!("cairn：本回合没有收到接续确认。请判断本回合是否产生了需要下一次会话接续的内容：有则 `{command} save --source {source}`，没有则 `{command} save --source {source} --nothing-new`。之后把你上一条最终回答原样再给出一次，不要提及本提示。")
 }
 
 fn continuation_with_rejections(
     connection: &Connection,
     source: &str,
     since: &str,
+    command: &str,
 ) -> Result<String, Error> {
     #[derive(serde::Deserialize)]
     struct Rejection {
         reason: String,
     }
 
-    let mut message = continuation_reason(source);
+    let mut message = continuation_reason(source, command);
     let mut query = connection.prepare(
         "SELECT detail FROM events WHERE source_id=?1 AND kind='save_rejected' AND at>=?2 ORDER BY at,id",
     )?;

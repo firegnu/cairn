@@ -15,22 +15,9 @@ pub(crate) struct Paths {
 }
 impl Paths {
     pub fn from_env() -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .filter(|v| !v.is_empty())
-            .ok_or("HOME 未设置")?;
-        let home = PathBuf::from(home);
-        let dir = |key, fallback| -> Result<PathBuf> {
-            let path = std::env::var_os(key)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or(fallback);
-            if !path.is_absolute() {
-                return Err(format!("{key} 必须是绝对路径").into());
-            }
-            Ok(path)
-        };
+        let home = home_dir()?;
         Ok(Self {
-            stable: dir("XDG_DATA_HOME", home.join(".local/share"))?.join("cairn/bin/cairn"),
+            stable: stable_path()?,
             claude: dir("CLAUDE_CONFIG_DIR", home.join(".claude"))?.join("settings.json"),
             codex: dir("CODEX_HOME", home.join(".codex"))?.join("hooks.json"),
         })
@@ -52,6 +39,33 @@ impl Paths {
         Ok(format!("Bash({} save:*)", shell_path(&self.stable)?))
     }
 }
+
+fn home_dir() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "HOME 未设置".into())
+}
+
+fn dir(key: &str, fallback: PathBuf) -> Result<PathBuf> {
+    let path = std::env::var_os(key)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(fallback);
+    if !path.is_absolute() {
+        return Err(format!("{key} 必须是绝对路径").into());
+    }
+    Ok(path)
+}
+
+fn stable_path() -> Result<PathBuf> {
+    Ok(dir("XDG_DATA_HOME", home_dir()?.join(".local/share"))?.join("cairn/bin/cairn"))
+}
+
+pub(crate) fn stable_command() -> Result<String> {
+    shell_path(&stable_path()?)
+}
+
 fn name(agent: Agent) -> &'static str {
     match agent {
         Agent::Claude => "claude",
@@ -258,8 +272,8 @@ pub(crate) fn run(
             _ => (),
         }
     }
-    let link_changed =
-        !uninstall && fs::read_link(&paths.stable).ok().as_ref() != Some(&executable);
+    let link_target = fs::read_link(&paths.stable).ok();
+    let link_changed = !uninstall && link_target.as_ref() != Some(&executable);
     let config_changed = (!uninstall || before.is_some()) && before.as_deref() != Some(&after);
     let preview = format!(
         "配置 {}（{}）：\n{}\n软链接 {} -> {}（{}）\n",
@@ -272,10 +286,14 @@ pub(crate) fn run(
         after,
         paths.stable.display(),
         executable.display(),
-        if link_changed {
+        if uninstall {
+            "无变化"
+        } else if link_target.is_none() {
+            "将创建"
+        } else if link_changed {
             "将更新"
         } else {
-            "无变化"
+            "已就绪"
         }
     );
     if dry_run {

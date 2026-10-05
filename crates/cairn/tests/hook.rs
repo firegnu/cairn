@@ -32,6 +32,7 @@ fn isolated(key: &std::ffi::OsStr) -> bool {
         || [
             "HOME",
             "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
             "XDG_CONFIG_HOME",
             "TMPDIR",
             "CAIRN_DISABLE",

@@ -123,6 +123,7 @@ fn dispatch(
     root: &Path,
 ) -> crate::cli::Result<String> {
     let now = chrono::Utc::now();
+    let command = crate::install::stable_command()?;
     if event == "SessionStart" {
         use crate::session::StartKind;
         let start_kind = match metadata.source.as_deref() {
@@ -135,6 +136,7 @@ fn dispatch(
         return Ok(crate::session::start(
             &crate::session::SessionStarted {
                 disabled: false,
+                command: &command,
                 agent: agent.name(),
                 session_id: &metadata.session_id,
                 cwd: &metadata.cwd,
@@ -162,6 +164,7 @@ fn dispatch(
     let scope = git.resolve(&metadata.cwd)?;
     let at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let context = crate::turn::Context {
+        command: &command,
         database,
         spool_root: root,
         project_key: &scope.project_key,
