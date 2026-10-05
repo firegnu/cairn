@@ -35,6 +35,26 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Uninstall {
+        #[arg(long, value_enum)]
+        agent: crate::hook::Agent,
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    Install {
+        #[arg(long, value_enum)]
+        agent: crate::hook::Agent,
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+    },
     Hook {
         #[arg(value_enum)]
         agent: crate::hook::Agent,
@@ -93,6 +113,22 @@ fn read_body(input: &mut impl Read, nothing_new: bool) -> Result<Option<String>>
 }
 
 pub fn run(cli: Cli, input: &mut impl Read) -> Result<String> {
+    if let Command::Install {
+        agent,
+        dry_run,
+        yes,
+    } = cli.command
+    {
+        return crate::install::run(agent, dry_run, yes, false, input);
+    }
+    if let Command::Uninstall {
+        agent,
+        dry_run,
+        yes,
+    } = cli.command
+    {
+        return crate::install::run(agent, dry_run, yes, true, input);
+    }
     if let Command::Hook { agent } = cli.command {
         return Ok(crate::hook::run(agent, input, None));
     }
@@ -132,6 +168,20 @@ pub fn run_at(
     database: &Path,
     root: &Path,
 ) -> Result<String> {
+    match cli.command {
+        Command::Install {
+            agent,
+            dry_run,
+            yes,
+        } => return crate::install::run(agent, dry_run, yes, false, input),
+        Command::Uninstall {
+            agent,
+            dry_run,
+            yes,
+        } => return crate::install::run(agent, dry_run, yes, true, input),
+        Command::Status { json } => return crate::status::run(cwd, database, root, json),
+        _ => (),
+    }
     if let Command::Hook { agent } = cli.command {
         return Ok(crate::hook::run(agent, input, Some((database, root))));
     }

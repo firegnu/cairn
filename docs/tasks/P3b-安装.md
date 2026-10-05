@@ -57,3 +57,44 @@
 
 ## 做完
 在本文件末尾追加「## 完成记录」（在你的分支里提交）：做了什么、验证了什么、拿主意的地方、没做的事，各几句话。回复里只写这几样，加上有没有要主控决定的事。命令都在前台跑完，全部做完后，回复最后一行写 DONE。
+
+## 完成记录
+
+实现者：cairn/dev-install（Codex），2026-10-05，分支 `p3b-install`。
+
+### 做了什么
+
+- 新增 `install.rs`、`install_json.rs`、`status.rs`，接入 install / uninstall / status CLI。配置修改先完整预览，再经终端确认或 `--yes` 应用；`--dry-run` 不建目录、文件或软链接。配置写入使用同目录临时文件原子改名，保留原权限；已有配置在修改前保存带 UTC 时间和随机后缀、独占创建的备份。
+- 安装四个指定事件及 Claude 的单条 save 规则；Codex SessionStart 的 handler 配置 `additionalContextLimit: 6000`，SessionEnd 超时 3 秒；Claude SessionEnd 超时 1 秒，落在资料所述 1.5 秒共享预算内。Codex 安装后和 status 中均提醒 `/hooks` 审核信任。
+- 稳定软链接使用 XDG_DATA_HOME / HOME 推导的路径，目标是当前二进制的规范路径。重复安装配置逐字不变；仅更新软链接目标时不改 hook 定义。JSON 修改复用未变成员的原始文本，保留其他设置的顺序、空白、数值表示和转义字符，不用整份重新格式化代替增量合并。
+- status 提供文字 / JSON：两种 agent 各事件的条目存在情况、命令是否指向稳定路径、Claude save 规则、软链接与目标有效性、项目采用状态、暂存区目录和 `.json` / `.tmp` 数量。新增 `Spool::inspect` 仅打开已有目录，并复用 2c 的计数及权限检查；不改变原有 `Spool::open` 行为。
+
+### 验证了什么
+
+- 新增 8 项进程级 CLI 集成测试（`crates/cairn/tests/install.rs`）。每个测试通过 `env_clear` 建立临时 HOME、XDG_DATA_HOME、XDG_STATE_HOME、XDG_CONFIG_HOME、CODEX_HOME、CLAUDE_CONFIG_DIR、TMPDIR，并隔离 Git 全局配置。暂存区沿用 §6.5 的系统私有根，命名空间由临时数据库路径隔离，计数测试只清理自己的命名空间。
+- 验收覆盖：合成用户 hook / 设置的原始字节保留；重复安装与软链接换目标；卸载只删自身且原配置等价；安装和卸载备份并存、不覆盖；未安装 / 已安装 / 失效软链接；项目已采用 / 未采用 / 尚无数据库；待收取与残留文件准确计数且不收取、不改数据库主文件；dry-run 不写，非终端未确认拒绝。
+- 直接相关边角：坏 JSON 拒绝且不覆盖；混合 handler 中修正旧 cairn 路径并保留其他 handler；空 settings 无自身条目时卸载不改文件；路径中的空格 / 单引号正确 shell 引用；稳定路径被普通文件占用时拒绝；配置文件是软链接时拒绝替换。权限规则路径含通配符等不支持字符时拒绝，避免意外扩大 save 权限。
+- RED → GREEN：最初 install / uninstall / status 分别因缺少对应子命令失败；旧 cairn 路径状态检测因漏报失败；空对象卸载因删除无关空设置失败。各次均在最小实现或修复后通过，没有用语法错误作为 RED。
+- 最终检查：`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo test --all-targets` 一次通过，共 99 项；`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo clippy --all-targets -- -D warnings` 一次通过。`cargo fmt --all`、`git diff --check` 通过。所有命令均等待前台进程结束。
+
+### 拿主意的地方
+
+- 尊重 `CLAUDE_CONFIG_DIR`（[Claude 官方配置位置说明](https://code.claude.com/docs/en/settings)），默认 `~/.claude/settings.json`；尊重 `CODEX_HOME`，默认 `~/.codex/hooks.json`；空环境变量按未设置处理，非绝对配置目录拒绝。
+- 只识别直接执行的绝对路径 `.../cairn hook <agent>` 及 `Bash(.../cairn save:*)`，支持 shell 引号。修正和删除自身条目时不把仅包含 cairn 字样的其他命令当成自己的条目；不处理包装脚本或复合命令。
+- 卸载始终保留稳定软链接：避免影响另一种 agent 或用户现有命令引用；不会删除二进制、状态库或暂存文件。
+- **主控已在本轮明确决定**：允许 `status` 沿用 `Store::open_read_only` 的 SQLite WAL/SHM 辅助文件行为，业务数据不变。status 不建数据库、不收取暂存区、不创建暂存区目录、不读取 Codex 信任配置；没有使用会忽略并发变化的 immutable 模式绕过 SQLite 锁。
+
+### 没做的事 / 待决定
+
+- 未运行真实 agent，未在真实 HOME 安装 / 卸载，未读写真实工具配置、会话、工具记忆或 cairn 数据库；未改 config.toml、sandbox / approval、表结构、原模块既有行为、README、HANDOFF 或 DESIGN。
+- 未合并 main、未推送、未清理主控 worktree / agent。无新增待主控决定事项；后续交叉审查、合并及真实环境安装由主控按原流程推进。
+
+## 返工记录
+
+2026-10-05，按主控转交的交叉审查 R1–R3 返工；主仓库的交叉审查文件只读，未修改。
+
+- **R1**：认领前先检查引号和转义，仅接受无 shell 运算符或展开的字面量单词，再核对绝对路径、`cairn` 文件名及恰好两个参数 `hook <agent>`。未引用的控制符、通配符、变量/命令展开、注释或附加参数均不认领；合法引号中的空格、单引号仍支持。install、uninstall、status 共用这条认领规则，save 权限条目的路径也使用相同的字面量检查。回归覆盖审查中的 `/usr/bin/true;/opt/user/cairn hook claude`、相关运算符/展开/注释，并验证两种 agent 的配置原文保留和 status 不误认。
+- **R2**：在合并入口递归检查所有对象的原始成员，按解码后的键检测重复；重复时报 `duplicate object key`，在配置、备份、目录或软链接写入前退出。回归覆盖审查原文、数组内嵌对象及 Unicode 转义后重名的键，确认 install/uninstall 均拒绝，原文件字节及权限不变，没有新增文件、备份、目录或链接。
+- **R3**：保持现有清理行为：删除最后一条 cairn entry 时，清理随之为空的事件数组、hooks 对象、allow 数组和 permissions 对象，不区分空容器原先存在还是安装新增。因此安装/卸载的“等价”指 hook 和权限语义等价，不保证原有空容器的结构往返不变。已补审查中的 `{"hooks":{"Stop":[]},"permissions":{"allow":[]},"theme":"dark"}` 往返用例，断言最终仅剩 `{"theme":"dark"}`；没有 cairn 条目时直接卸载仍保留原有空容器。
+- **验证**：R1 首次因 status 将复合命令认成自身 handler 而失败，R2 首次因 install 接受重复键而失败，修复后转绿；R3 为既有行为刻画，不制造 RED。`cargo test --test install review_r` 的 3 项回归通过，均使用已有隔离 HOME / XDG / 工具配置目录夹具，未执行合成 hook 命令。最终 `CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo test --all-targets` 一次通过，共 102 项；`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo clippy --all-targets -- -D warnings` 一次通过。所有命令均等待前台进程结束。
+- **范围**：仅修改命令认领、安装 JSON 检查、上述回归和本记录；无新依赖，不改变 R3 清理行为、DESIGN 或已确认的 SQLite 辅助文件边界。未读写真实配置/会话/数据，未运行真实 agent，未修改主仓库审查文件，未合并或推送；无新增待主控决定事项。

@@ -75,6 +75,38 @@ pub(crate) enum Candidate {
 }
 
 impl Spool {
+    /// Inspect an existing namespace without creating either directory.
+    pub fn inspect(root: &Path, database_path: &Path) -> Result<Status> {
+        if !root.is_absolute() || !database_path.is_absolute() {
+            return Err(Error::UnsafeDirectory);
+        }
+        let ns =
+            format!("{:x}", Sha256::digest(database_path.as_os_str().as_bytes()))[..16].to_owned();
+        let path = root.join("cairn-spool").join(&ns);
+        let root_fd = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(root)?;
+        check_directory(&root_fd, 0o022)?;
+        let directory = (|| {
+            let base = open_existing_directory(&root_fd, "cairn-spool")?;
+            open_existing_directory(&base, &ns)
+        })();
+        match directory {
+            Ok(directory) => Self {
+                directory,
+                path,
+                database_path: database_path.into(),
+            }
+            .status(),
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound => Ok(Status {
+                path,
+                pending_json: 0,
+                residual_tmp: 0,
+            }),
+            Err(e) => Err(e),
+        }
+    }
     /// `database_path` must be the lexical absolute path from store::database_path.
     /// Callers/tests may supply an explicit private root; the same checks apply.
     pub fn open(root: &Path, database_path: &Path) -> Result<Self> {
@@ -378,6 +410,19 @@ fn open_directory(parent: &File, name: &str) -> Result<File> {
         }
         Err(error) => return Err(error.into()),
     };
+    check_directory(&file, 0o077)?;
+    Ok(file)
+}
+
+fn open_existing_directory(parent: &File, name: &str) -> Result<File> {
+    let name = CString::new(name).unwrap();
+    let file = file_from_fd(unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    })?;
     check_directory(&file, 0o077)?;
     Ok(file)
 }
