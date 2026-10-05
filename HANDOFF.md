@@ -12,11 +12,12 @@ b install / uninstall / status（`install.rs`、`status.rs`）已合并并经交
 
 ## 下一步
 
-1. 派 3c 安装方式与 README（在全新隔离 HOME 里照 README 走一遍）。
-2. 3c 后问用户：要不要在 p1-lab 里用真实 agent 做一次端到端冒烟测试，再进入阶段 4 试点。
+1. 问用户：要不要在 p1-lab 里用真实 agent 做一次端到端冒烟测试，再进入阶段 4 试点。
 
 ## 悬而未决
 
+- 3c 走查在真实私有临时目录留下空目录 `cairn-spool/7262111286db64b8/`（无文件），删不删由用户定。
+- 真实安装（`cairn install`）必须等用户明确同意；会改 `~/.claude/settings.json`、`~/.codex/hooks.json` 并建 `~/.local/share/cairn/bin/cairn` 软链接，Codex 需在 `/hooks` 信任。
 - DESIGN 在阶段 2 中的修订：收取必须向前推进（9585ea1）；resume/fork 补注入规则与回合起点约定（a5c9141）；无 turn_key 不续跑（9f6f20e）；correct 只以 checkpoint 为目标（afd2212）；取代 / 撤回 / 恢复按 rowid 判定先后、不执行 VACUUM（a520af2）。
 - 2b 审查的建议改：空仓库、detached HEAD、脏工作区计数、upstream ref 缺失没有专项测试，可在 2c / 2d 集成时补。
 - DESIGN §6.5 已改（9585ea1）：收取必须向前推进，来源优先是尽力而为。
