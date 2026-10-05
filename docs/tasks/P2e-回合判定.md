@@ -56,3 +56,31 @@
 
 ## 做完
 在本文件末尾追加「## 完成记录」（在你的分支里提交）：做了什么、验证了什么、拿主意的地方、没做的事，各几句话。回复里只写这几样，加上有没有要主控决定的事。命令都在前台跑完，全部做完后，回复最后一行写 DONE。
+
+## 完成记录
+
+2026-10-05，cairn/dev-turn（Codex），分支 `p2e-turn`。
+
+**做了什么**：先按主控指示执行 `git merge main`，快进至 `9f6f20e`，带入缺失 turn_key 时不续跑的设计和任务书修订。新增 `turn.rs`，在 `lib.rs` 声明；提供纯函数 `decide(Facts) -> Outcome`，以及 `turn_started` / `turn_ended` / `session_ended` 三个入口。`Context` 接收数据库词法路径、暂存可信根、已解析的项目键、agent / session_id、收到时间和禁用标记；不读环境或调用 Git。入口返回 `Report { action, errors }`，错误时放行，错误交由阶段 3 记录。
+
+TurnStarted 在事务中登记 hook 来源并记录起点；TurnEnded 先检查禁用和采用状态，复用 2c 的来源优先收取和三态 pending 查询，仅以已提交的 confirmations 判定确认。用已有唯一键的冲突忽略插入保证最多请求一次续跑；续跑原因保留 §9.3 原文，只从本来源窗口内的拒收事件提取 reason，不读或输出记录正文。SessionEnded 只写结束事件。未修改地基模块、收取接口、表结构或 CLI。
+
+**验证了什么**：所有命令均在前台等待结束，所有 Cargo 命令使用指定共享编译目录。按行为逐步取得有效 RED→GREEN：开始入口尚无落库行为导致来源缺行；结束入口未请求续跑；纯判定缺少优先级；continued 再次请求续跑；未收取有效暂存文件；把积压文件误判为可续跑；续跑原因漏掉拒收原因；会话结束未写事件；pending Unknown 未向调用方报告错误。最初测试夹具的生命周期编译错误不计作 RED。
+
+`crates/cairn/tests/turn.rs` 共 15 项测试，覆盖任务六条验收及明确要求：重复 Stop、结束先于开始和两个回合交错、continued 的 confirmed / unconfirmed_after_continue、缺 ID 重送、数据库忙 / SQL 失败放行、四个并发入口对同一回合只请求一次；暂存收取后确认、未处理 / 未知暂存记 pending、拒收原因和正文隔离、禁用 / 未采用无操作。
+
+直接相关边角用例：
+- 两种 agent 来源登记及更新、事件时间和 turn_key 持久化；SessionEnded 不登记来源、不收取，保留暂存文件。
+- 续跑前后回合 ID 改变仍不再续跑；无 ID 时有 / 无 TurnStarted 两种降级路径，窗口推进也只写 skipped。
+- 最近 TurnStarted、上次判定、会话开始三个窗口层级和来源 first_seen 兜底；包含窗口起点，排除窗口之前和其他来源的确认；同时覆盖 saved 和 nothing_new。
+- 未提交的确认不算确认，锁释放并回滚后仍能请求续跑；失败的 TurnStarted 完整回滚来源更新。
+- 收取事务失败时仍可写 pending / confirmed，但不会请求续跑或占用请求键；撤销合成故障后文件能收取，尚未请求过的回合仍有续跑机会。
+- 数据库尚不存在时不建库、不建暂存区；拒收原因按来源和窗口过滤。
+
+最终 `cargo test --all-targets` 一次通过：turn 15、save 19、scope/facts 5、store 17、probe 4，共 60 项；`cargo clippy --all-targets -- -D warnings` 一次通过。`cargo fmt --all -- --check` 和 `git diff --check` 通过。新增测试显式传入临时 HOME / XDG_STATE_HOME 路径值、临时非 Git 项目和暂存可信根，不改变进程环境；现有全量测试继续使用自身隔离夹具。未访问真实数据库、暂存区、配置或会话。
+
+**拿主意的地方**：严格保持 §8.3 顺序，continued / 已确认 / pending 优先；走到请求续跑这一步却没有有效 turn_key 时，键用 `no-key:<窗口起点>` 写 skipped。没有可观测的回合或会话起点时不编造时间，带错误放行。会话起点先取最早的 session_started，缺失时取来源 first_seen。确认和暂存查询均使用包含起点的下界，与 2c 接口一致。
+
+pending 查询固定使用 100 ms 预算，不改变 2c 收取的 50 文件 / 300 ms 预算。查询后用短 IMMEDIATE 事务重查采用状态、窗口和确认；窗口被并发 hook 改变时，旧暂存查询不能证明新窗口没有文件，按 Unknown 放行。2c 的 Unknown 不提供底层原因，因此返回固定 `PendingUnknown` 错误供阶段 3 日志记录，不猜测根因。收取报错不阻止后续观测，但任何错误都禁止返回续跑、也不消耗续跑请求键。本模块新增的数据库时间使用传入的收到时间，2c 收取自身的时间约定保持不变。暂存查询仍是有预算的观测，不声称与并发发布形成跨文件系统 / 数据库原子快照。
+
+**没做的事**：未做渲染、SessionStarted、hook JSON 适配及输出、errors.log、用户命令或 install；未改变 DESIGN（只合入主控修订）、HANDOFF、真实配置及其他模块行为，未开或委派 agent。未合并回 main、未推送。没有新增需主控决定的事项；交叉审查与合并留给主控。
