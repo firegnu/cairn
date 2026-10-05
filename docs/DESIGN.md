@@ -283,7 +283,7 @@ cairn status [--json]
 6. 不同的 start_kind：
    - startup、clear：完整注入。
    - compact：完整注入一次，因为压缩后上下文只剩摘要。
-   - resume、fork：只补本来源上次注入之后的新记录和现场变化，具体规则在阶段 2 定。
+   - resume、fork：注入抬头、本工作线上**还没注入给这个来源过**的可见记录（查 `injections`），以及现场对比；没有这样的记录时只注入抬头和现场对比。其他工作线和折叠提示不再重复。
 
 ### 8.2 `cairn save`
 
@@ -333,6 +333,8 @@ save 进程里：
 **不做的假设**：不假设 hook 回调的先后顺序，也不假设同一会话的 hooks 一定串行。官方文档写明，两种工具都会并发执行匹配到的 hooks。
 
 **第一阶段实测边界**：Claude Code 2.1.289 的 `prompt_id`、Codex 0.160.0 的 `turn_id` 在本轮续跑前后都不变，`stop_hook_active` 从 false 变为 true。判断续跑仍以该字段为准，不能把本版本 ID 不变当作跨版本保证。有效样例未观测到重复送达，但未做宿主重送或乱序故障实验，唯一键去重不能省略。证据见[第一阶段能力实测 B](调研/第一阶段能力实测.md#4-b回合续跑中断与重复)。
+
+**回合起点的存法**：TurnStarted 写一条 `events`（`kind=turn_started`，`detail` 存 turn_key，`at` 是收到时间）。确认窗口的起点取这个来源最近一条 `turn_started` 的 `at`；没有就按上面第 5 步的降级规则。
 
 ### 8.4 SessionEnded
 
@@ -452,7 +454,7 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 
 - **确定的事实**：每个来源最后一次落盘的时间和记录 ID。
 - **之后观测到的事件**，原样列出：
-  - 有几个回合结束时没有确认；
+  - 有几个回合结束时没有确认：数这个来源在最后一次落盘之后 `turn_decisions` 里 `unconfirmed_after_continue` 的回合（`pending_unprocessed` 是未知，不算进去）；
   - 是否观测到会话结束；
   - 这个来源是否只用过 CLI、没有 hook 事件。
 - **固定措辞**：没观测到会话结束时，写"可能仍在运行、hook 未触发或异常退出，无法区分"。
@@ -521,7 +523,7 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 | 回合起点怎么标出；续跑后 Codex 的 `turn_id` 会不会变 | B 已确认：使用 UserPromptSubmit；本轮 turn_id 不变、stop_hook_active=true，仍以续跑标记为准 |
 | Claude 的 hook 写在用户 settings 还是插件里 | E 建议用户 settings 增量合并；插件及用户级安装未实际比较，阶段 3 在隔离 HOME 下验证 |
 | 注入预算，以及 Codex 的 `additionalContextLimit` 设多少 | A 的交互样例通过：6,000 字符、Codex handler limit=6000；默认预算不够，见 §9.1 |
-| resume、fork 时具体补注入什么 | resume 事件及新注入已测，fork 未测；补哪些内容仍由阶段 2 定 |
+| resume、fork 时具体补注入什么 | 已定（§8.1 第 6 步）：只补还没注入给该来源的记录和现场对比 |
 | 正文长度上限、注入文字的最终措辞 | 阶段 2，可以试点再调；G 支持只要求原样重发，不加入额外结束标记 |
 | 是否要为被委派 agent 或脚本会话提供默认排除 | H 已确认环境继承；用户很少用非交互，未明确默认排除策略，仍由用户决定 |
 
