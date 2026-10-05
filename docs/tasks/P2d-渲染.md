@@ -95,3 +95,11 @@ startup / clear / compact / other 完整渲染；resume / fork 只补本来源�
 随后 `cargo test --all-targets` 和 `cargo clippy --all-targets -- -D warnings` 各运行一次，均通过；全量共 57 项（render/session 12、save 19、scope/facts 5、store 17、probe 4）。所有命令均前台等待结束，Cargo 使用指定共享 target；测试仍为合成材料、临时 HOME / XDG_STATE_HOME、临时 Git 仓库和显式临时暂存可信根。格式化和差异空白检查通过，没有扩大验证范围、放宽断言或改超时。
 
 **范围**：本次仅修改 `render.rs`、`tests/render_session.rs` 和本任务文件，提交到 `p2d-render`；未改 DESIGN、地基模块、主仓库审查文件、真实配置或数据，未合并、未推送。没有新增需主控决定的事项。
+
+## 主控审查
+
+2026-10-05，cairn/main。结论：通过，已合并。
+- 初审：没动地基模块和 DESIGN；验收 4 条有测试；测试与 clippy 通过。
+- 完成记录里"用户确认措辞范围：限定自动生成文字，正文原样保留"，主控已向用户核实，属实。
+- 交叉审查（`docs/tasks/P2d-渲染-交叉审查.md`）：必须改 1 条（其他工作线摘要漏掉更正），建议改 1 条（停点摘要跳过开头空行），返工 a6c4a56 后复核"可以合并"。
+- 合并后 main 上全量测试与 clippy 通过。

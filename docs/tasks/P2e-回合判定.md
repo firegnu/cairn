@@ -96,3 +96,11 @@ pending 查询固定使用 100 ms 预算，不改变 2c 收取的 50 文件 / 30
 **限定验证结果**：新测试按 RED→GREEN 各运行一次；随后 `cargo test --all-targets` 仅运行一次，**未通过**。它在原有 save 测试组以 13 通过、6 失败结束（81.99 s），失败均为 `Timeout(2s)`：`concurrent_saves_publish_distinct_files_and_collect_every_operation`、`database_namespaces_and_foreign_destinations_are_left_untouched`、`exclusive_publication_preserves_existing_final_and_temp_files`、`priority_backlog_makes_progress_on_every_collection`、`invalid_id_version_or_timestamp_reject_without_body_or_confirmation`、`supersedes_requires_existing_live_injected_target_on_same_project_and_line`。代码对应既有 Git 调用的 2 秒超时；本轮未查明超时根因，也不据此声称是环境抖动。全量运行在 save 组退出，未执行后续 turn 等测试组；新回归的 GREEN 来自此前定点运行。`cargo clippy --all-targets -- -D warnings` 仅运行一次，通过。
 
 所有命令均前台等待结束，Cargo 使用指定共享编译目录。按主控“各一次”的要求未重跑全量、未扩展测试或排查矩阵；未改 save / scope 等模块、现有测试、断言或超时。测试只用临时状态目录、项目和可信根，未访问真实数据或配置。此次只修改 `turn.rs`、`tests/turn.rs` 和本任务文件；未改 DESIGN 或主仓库审查文件，未合并回 main、未推送。没有新增设计事项；全量验证的超时失败留给主控决定后续处理。
+
+## 主控审查
+
+2026-10-05，cairn/main。结论：通过，已合并。
+- 开工前发现 DESIGN 漏洞（无 turn_key 时去重键不稳定会续跑两次），主控按建议修订 §8.3（9f6f20e）：无 turn_key 不续跑、记 skipped。
+- 交叉审查（`docs/tasks/P2e-回合判定-交叉审查.md`）："可以合并"，建议改 1 条（暂存区打开失败不应中断判定），主控采纳，返工 0b45906 由主控核对 diff 后合并。
+- 返工时全量测试有 6 个 save 测试 git 超时，主控在负载降下来后重跑全部通过，判断为并行负载导致。建议改（未做）：测试里 git 的 2 秒超时在机器繁忙时不稳，后续可让测试用更宽的超时。
+- 合并后 main 上全量测试与 clippy 通过。
