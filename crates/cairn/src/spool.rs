@@ -68,6 +68,12 @@ pub struct Status {
     pub residual_tmp: usize,
 }
 
+pub(crate) enum Candidate {
+    Ready(Header, File),
+    Skipped,
+    Unknown,
+}
+
 impl Spool {
     /// `database_path` must be the lexical absolute path from store::database_path.
     /// Callers/tests may supply an explicit private root; the same checks apply.
@@ -140,7 +146,11 @@ impl Spool {
         let mut names = Vec::new();
         loop {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                break;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "spool listing budget exhausted",
+                )
+                .into());
             }
             // readdir signals end with NULL and errno=0 on macOS.
             unsafe {
@@ -193,24 +203,20 @@ impl Spool {
 
     /// Return a verified destination header and the file positioned at payload.
     /// Capacity 1 is intentional: a foreign body's bytes must not be read ahead.
-    pub(crate) fn candidate(
-        &self,
-        name: &str,
-        deadline: Instant,
-    ) -> Result<Option<(Header, File)>> {
+    pub(crate) fn candidate(&self, name: &str, deadline: Instant) -> Result<Candidate> {
         let Some(file) = self.open_entry(name)? else {
-            return Ok(None);
+            return Ok(Candidate::Skipped);
         };
         let mut reader = BufReader::with_capacity(1, DeadlineFile { file, deadline });
         let mut first = Vec::new();
         if let Err(error) = reader.read_until(b'\n', &mut first) {
             if error.kind() == io::ErrorKind::TimedOut {
-                return Ok(None);
+                return Ok(Candidate::Unknown);
             }
             return Err(error.into());
         }
         if !first.ends_with(b",\n") {
-            return Ok(None);
+            return Ok(Candidate::Unknown);
         }
         first.truncate(first.len() - 2);
         first.push(b'}');
@@ -220,12 +226,12 @@ impl Spool {
             header: Header,
         }
         let Ok(envelope) = serde_json::from_slice::<Envelope>(&first) else {
-            return Ok(None);
+            return Ok(Candidate::Unknown);
         };
         if envelope.header.database_path != self.database_path {
-            return Ok(None);
+            return Ok(Candidate::Skipped);
         }
-        Ok(Some((envelope.header, reader.into_inner().file)))
+        Ok(Candidate::Ready(envelope.header, reader.into_inner().file))
     }
 
     pub(crate) fn payload(file: File, deadline: Instant) -> serde_json::Result<Payload> {

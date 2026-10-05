@@ -1,5 +1,5 @@
 use cairn::cli::{self, Cli};
-use cairn::ingest::ingest;
+use cairn::ingest::{ingest, pending, Pending};
 use cairn::save::Operation;
 use cairn::spool::Spool;
 use cairn::store::{database_path, BusyTimeout, Store};
@@ -258,6 +258,231 @@ fn collection_prioritizes_source_and_stops_at_fifty_operations() {
         .join(format!("{}.json", ulid::Ulid::from(50u128)));
     assert!(remaining.exists());
     assert_eq!(ingest(&mut store, &spool, None).unwrap().processed, 1);
+}
+
+#[test]
+fn priority_backlog_makes_progress_on_every_collection() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let mut store = f.store();
+    source(&store, "codex:backlog");
+    f.run(&["save", "--source", "codex:backlog", "--nothing-new"], "")
+        .unwrap();
+    let (path, mut operation) = f.queued();
+    fs::remove_file(path).unwrap();
+    operation.payload.created_at = AT.into();
+    let spool = f.spool();
+    for n in 1..=4000 {
+        operation.header.op_id = ulid::Ulid::from(n as u128).to_string();
+        spool.publish(&operation).unwrap();
+    }
+    let mut total = 0;
+    for round in 1..=3 {
+        // Reopen on every call, as independent hooks do. No in-memory cursor
+        // from the previous invocation may be necessary to make progress.
+        let report = ingest(&mut store, &f.spool(), Some("codex:backlog")).unwrap();
+        assert!(
+            (1..=50).contains(&report.ingested),
+            "round {round}: {report:?}"
+        );
+        assert_eq!(report.processed, report.ingested);
+        total += report.ingested;
+        assert_eq!(spool.status().unwrap().pending_json, 4000 - total);
+        assert_eq!(count(&store, "confirmations"), total as i64);
+        let latest: String = store
+            .connection()
+            .query_row(
+                "SELECT op_id FROM confirmations ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(latest, ulid::Ulid::from(total as u128).to_string());
+    }
+}
+
+#[test]
+fn pending_query_filters_target_source_window_and_processed_operations() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let store = f.store();
+    source(&store, "codex:pending");
+    let spool = f.spool();
+    let check = || {
+        pending(
+            &store,
+            &spool,
+            "codex:pending",
+            AT,
+            Duration::from_millis(300),
+        )
+    };
+    assert_eq!(check(), Pending::No);
+    f.run(&["save", "--source", "codex:pending", "--nothing-new"], "")
+        .unwrap();
+    let (path, mut operation) = f.queued();
+    fs::remove_file(path).unwrap();
+    operation.payload.created_at = AT.into();
+
+    let mut other_source = operation.clone();
+    other_source.header.op_id = ulid::Ulid::from(1u128).to_string();
+    other_source.header.source = Some("codex:other".into());
+    spool.publish(&other_source).unwrap();
+    let mut old = operation.clone();
+    old.header.op_id = ulid::Ulid::from(2u128).to_string();
+    old.payload.created_at = "2026-10-05T11:59:59.999Z".into();
+    spool.publish(&old).unwrap();
+    assert_eq!(check(), Pending::No);
+
+    let other_db = database_path(Some(&f.root.path().join("other-state")), None).unwrap();
+    let other_spool = Spool::open(f.root.path(), &other_db).unwrap();
+    let mut foreign = operation.clone();
+    foreign.header.op_id = ulid::Ulid::from(3u128).to_string();
+    foreign.header.database_path = other_db;
+    other_spool.publish(&foreign).unwrap();
+    let foreign_name = format!("{}.json", foreign.header.op_id);
+    let bytes = fs::read(other_spool.path().join(&foreign_name)).unwrap();
+    let header_end = bytes.iter().position(|&byte| byte == b'\n').unwrap() + 1;
+    let broken_foreign = [&bytes[..header_end], b"UNREADABLE_FOREIGN_BODY\xff"].concat();
+    let foreign_path = spool.path().join(&foreign_name);
+    fs::write(&foreign_path, &broken_foreign).unwrap();
+    assert_eq!(check(), Pending::No);
+    assert_eq!(fs::read(&foreign_path).unwrap(), broken_foreign);
+
+    operation.header.op_id = ulid::Ulid::from(4u128).to_string();
+    spool.publish(&operation).unwrap();
+    let matching_path = spool
+        .path()
+        .join(format!("{}.json", operation.header.op_id));
+    let matching_bytes = fs::read(&matching_path).unwrap();
+    let snapshot = database_snapshot(&store);
+    assert_eq!(check(), Pending::Yes); // inclusive window boundary
+    assert_eq!(database_snapshot(&store), snapshot);
+    assert_eq!(fs::read(&matching_path).unwrap(), matching_bytes);
+    store
+        .connection()
+        .execute(
+            "INSERT INTO spool_ops(op_id,outcome,source_id,processed_at)
+        VALUES (?1,'ingested','codex:pending',?2)",
+            params![operation.header.op_id, AT],
+        )
+        .unwrap();
+    assert_eq!(check(), Pending::No); // committed, but unlink has not happened
+    assert!(matching_path.exists());
+    let temp = spool
+        .path()
+        .join(format!(".{}.tmp", ulid::Ulid::from(5u128)));
+    fs::write(&temp, &matching_bytes).unwrap();
+    let link = spool
+        .path()
+        .join(format!("{}.json", ulid::Ulid::from(6u128)));
+    symlink(&matching_path, &link).unwrap();
+    assert_eq!(check(), Pending::No);
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    operation.header.op_id = ulid::Ulid::from(7u128).to_string();
+    operation.payload.created_at = "2026-10-05T12:00:00.001Z".into();
+    spool.publish(&operation).unwrap();
+    assert_eq!(check(), Pending::Yes);
+    // The query keeps using the verified namespace descriptor after its path
+    // is replaced; it must not follow the replacement to another directory.
+    let retained = f.root.path().join("retained-namespace");
+    fs::rename(spool.path(), &retained).unwrap();
+    symlink(other_spool.path(), spool.path()).unwrap();
+    assert_eq!(check(), Pending::Yes);
+    assert_eq!(
+        fs::read(retained.join(foreign_name)).unwrap(),
+        broken_foreign
+    );
+}
+
+#[test]
+fn pending_query_keeps_errors_and_exhausted_budget_unknown() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let store = f.store();
+    let spool = f.spool();
+    assert_eq!(
+        pending(&store, &spool, "codex:pending", AT, Duration::ZERO),
+        Pending::Unknown
+    );
+    assert_eq!(
+        pending(
+            &store,
+            &spool,
+            "codex:pending",
+            "invalid time",
+            Duration::from_millis(300)
+        ),
+        Pending::Unknown
+    );
+    let check = || {
+        pending(
+            &store,
+            &spool,
+            "codex:pending",
+            AT,
+            Duration::from_millis(300),
+        )
+    };
+    f.run(&["save", "--source", "codex:pending", "--nothing-new"], "")
+        .unwrap();
+    let (path, mut operation) = f.queued();
+    operation.payload.created_at = AT.into();
+    fs::remove_file(&path).unwrap();
+    spool.publish(&operation).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    fs::write(&path, b"broken header\nSYNTHETIC_PRIVATE_BODY").unwrap();
+    assert_eq!(check(), Pending::Unknown);
+    // Exhaust a positive budget while reading a header, not just at entry.
+    fs::write(&path, vec![b' '; 1024 * 1024]).unwrap();
+    assert_eq!(
+        pending(
+            &store,
+            &spool,
+            "codex:pending",
+            AT,
+            Duration::from_millis(10)
+        ),
+        Pending::Unknown
+    );
+    let end = bytes.iter().position(|&byte| byte == b'\n').unwrap() + 1;
+    fs::write(
+        &path,
+        [&bytes[..end], b"broken payload: SYNTHETIC_PRIVATE_BODY"].concat(),
+    )
+    .unwrap();
+    assert_eq!(check(), Pending::Unknown);
+    fs::write(&path, &bytes).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(check(), Pending::Unknown);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(check(), Pending::Yes);
+    store
+        .connection()
+        .execute_batch("CREATE TEMP VIEW spool_ops AS SELECT op_id FROM absent_table")
+        .unwrap();
+    assert_eq!(check(), Pending::Unknown);
+    store
+        .connection()
+        .execute_batch("DROP VIEW temp.spool_ops")
+        .unwrap();
+    assert_eq!(check(), Pending::Yes);
+    assert_eq!(count(&store, "confirmations"), 0);
+    assert_eq!(count(&store, "spool_ops"), 0);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        store
+            .connection()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2000
+    );
 }
 
 #[test]

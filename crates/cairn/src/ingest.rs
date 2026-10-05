@@ -1,7 +1,7 @@
 //! Bounded, per-operation transactional collection (DESIGN §6.5).
 
 use crate::save::{self, Header, Payload};
-use crate::spool::{self, Spool};
+use crate::spool::{self, Candidate, Spool};
 use crate::store::{self, Store};
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use std::time::{Duration, Instant};
@@ -24,6 +24,112 @@ pub struct Report {
     pub replayed: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pending {
+    Yes,
+    No,
+    Unknown,
+}
+
+/// Observe unprocessed operations for a declared source in the inclusive window
+/// `created_at >= since`. The spool supplies the lexical database destination;
+/// callers must open Store for that same database, just as for ingest().
+/// No means the scan completed. Incomplete/failed reads and budget exhaustion
+/// are Unknown; Yes needs one definite match. This is an observation, not a lock
+/// against a concurrent publisher/collector. No files or database rows are changed.
+pub fn pending(
+    store: &Store,
+    spool: &Spool,
+    source: &str,
+    since: &str,
+    budget: Duration,
+) -> Pending {
+    let Some(deadline) = Instant::now().checked_add(budget) else {
+        return Pending::Unknown;
+    };
+    if !save::valid_timestamp(since) || Instant::now() >= deadline {
+        return Pending::Unknown;
+    }
+    let Ok(original_timeout) = store
+        .connection()
+        .query_row("PRAGMA busy_timeout", [], |r| r.get::<_, u32>(0))
+    else {
+        return Pending::Unknown;
+    };
+    let result = pending_until(store, spool, source, since, deadline, original_timeout)
+        .unwrap_or(Pending::Unknown);
+    if store
+        .connection()
+        .busy_timeout(Duration::from_millis(original_timeout.into()))
+        .is_err()
+    {
+        return Pending::Unknown;
+    }
+    result
+}
+
+fn pending_until(
+    store: &Store,
+    spool: &Spool,
+    source: &str,
+    since: &str,
+    deadline: Instant,
+    original_timeout: u32,
+) -> Result<Pending, Error> {
+    let mut unknown = false;
+    for name in spool.names(Some(deadline))? {
+        if Instant::now() >= deadline {
+            return Ok(Pending::Unknown);
+        }
+        let Some(id) = name.strip_suffix(".json").filter(|id| spool::valid_id(id)) else {
+            continue;
+        };
+        store.connection().busy_timeout(
+            Duration::from_millis(original_timeout.into())
+                .min(deadline.saturating_duration_since(Instant::now())),
+        )?;
+        let processed: bool = store.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM spool_ops WHERE op_id=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if processed {
+            continue;
+        }
+        let (header, file) = match spool.candidate(&name, deadline)? {
+            Candidate::Ready(header, file) => (header, file),
+            Candidate::Skipped => continue,
+            Candidate::Unknown => {
+                unknown = true;
+                continue;
+            }
+        };
+        if header.source.as_deref() != Some(source) {
+            continue;
+        }
+        if header.version != 1 || header.op_id != id {
+            unknown = true;
+            continue;
+        }
+        match Spool::payload(file, deadline) {
+            Ok(payload) if save::valid_timestamp(&payload.created_at) => {
+                if Instant::now() >= deadline {
+                    return Ok(Pending::Unknown);
+                }
+                if payload.created_at.as_str() >= since {
+                    return Ok(Pending::Yes);
+                }
+            }
+            _ => unknown = true,
+        }
+    }
+    Ok(if unknown || Instant::now() >= deadline {
+        Pending::Unknown
+    } else {
+        Pending::No
+    })
+}
+
 /// Collect at most 50 operations, for up to 300 ms checked between file steps.
 /// SQLite lock waits share this budget. On any error, the current transaction
 /// rolls back and its file remains; earlier committed operations stay committed.
@@ -34,55 +140,50 @@ pub fn ingest(
     preferred_source: Option<&str>,
 ) -> Result<Report, Error> {
     let deadline = Instant::now() + Duration::from_millis(300);
-    let mut candidates = Vec::new();
-    for name in spool.names(Some(deadline))? {
-        if Instant::now() >= deadline {
-            break;
-        }
-        if !name.strip_suffix(".json").is_some_and(spool::valid_id) {
-            continue;
-        }
-        let preferred = if preferred_source.is_some() {
-            let Some((header, _)) = spool.candidate(&name, deadline)? else {
-                continue;
-            };
-            header.source.as_deref() == preferred_source
-        } else {
-            false
-        };
-        candidates.push((!preferred, name));
-    }
-    candidates.sort_unstable();
+    let names = spool.names(Some(deadline))?;
     let original_timeout: u32 = store
         .connection()
         .query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
     let result = (|| {
         let mut report = Report::default();
-        for (_, name) in candidates {
-            if report.processed == 50 || Instant::now() >= deadline {
-                break;
-            }
-            let Some((header, file)) = spool.candidate(&name, deadline)? else {
-                continue;
-            };
-            let payload = Spool::payload(file, deadline).map_err(|_| "invalid spool payload");
-            if Instant::now() >= deadline {
-                break;
-            }
-            store.connection().busy_timeout(
-                Duration::from_millis(original_timeout.into())
-                    .min(deadline.saturating_duration_since(Instant::now())),
-            )?;
-            let tx = store.transaction(TransactionBehavior::Immediate)?;
-            let id = name.strip_suffix(".json").unwrap();
-            let outcome = collect_one(&tx, id, &header, payload)?;
-            tx.commit()?;
-            spool.remove(&name)?;
-            report.processed += 1;
-            match outcome {
-                "ingested" => report.ingested += 1,
-                "rejected" => report.rejected += 1,
-                _ => report.replayed += 1,
+        // Process each preferred operation as soon as its header is known.
+        // The second pass handles other sources only after the preferred pass.
+        // Both passes retain filename order and share the same total budget.
+        for pass in 0..if preferred_source.is_some() { 2 } else { 1 } {
+            for name in &names {
+                if report.processed == 50 || Instant::now() >= deadline {
+                    return Ok(report);
+                }
+                if !name.strip_suffix(".json").is_some_and(spool::valid_id) {
+                    continue;
+                }
+                let Candidate::Ready(header, file) = spool.candidate(name, deadline)? else {
+                    continue;
+                };
+                if preferred_source.is_some()
+                    && (header.source.as_deref() == preferred_source) != (pass == 0)
+                {
+                    continue;
+                }
+                let payload = Spool::payload(file, deadline).map_err(|_| "invalid spool payload");
+                if Instant::now() >= deadline {
+                    break;
+                }
+                store.connection().busy_timeout(
+                    Duration::from_millis(original_timeout.into())
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                )?;
+                let tx = store.transaction(TransactionBehavior::Immediate)?;
+                let id = name.strip_suffix(".json").unwrap();
+                let outcome = collect_one(&tx, id, &header, payload)?;
+                tx.commit()?;
+                spool.remove(name)?;
+                report.processed += 1;
+                match outcome {
+                    "ingested" => report.ingested += 1,
+                    "rejected" => report.rejected += 1,
+                    _ => report.replayed += 1,
+                }
             }
         }
         Ok(report)

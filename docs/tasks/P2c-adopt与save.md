@@ -95,3 +95,17 @@
 `save::StoredFacts` 在持久化边界把 2b 的 Unix 毫秒转换为 `collected_at` 的 RFC 3339 UTC 毫秒字符串，其余事实字段保持原义；所有新增数据库时间列同样使用该格式。重复 adopt / unadopt 不刷新时间，未登记项目的 unadopt 为无操作；重新 adopt 更新采用时间并保留上次停用时间。`--nothing-new` 与 `--supersedes` 互斥，因为无新记录可承载取代关系；重复合法取代 ID 只写一次关系。库级调用者须用同一个 `database_path` 结果打开 Store 与 Spool，接口注释已写明。
 
 **没做的事**：未做渲染、注入、回合判定、hook、其他命令或 install；未修改 DESIGN、HANDOFF、地基模块及真实配置，未读取真实会话或真实 cairn 数据库。未启动/委派 agent，未合并 main，未推送。收取时间预算是文件读取、文件步骤和锁等待之间的协作式截止，不声称能强制中断操作系统内正在执行的系统调用。没有需要主控决定的设计变更；交叉审查与合并留给主控。
+
+## 返工记录
+
+2026-10-05，按交叉审查第 1、2 条返工；主仓库的交叉审查文件仅只读查看，未修改。
+
+**修改**：移除来源优先路径的全量头部预扫描和优先级排序。现在只先按文件名排列目录项，第一遍遇到匹配优先来源的头部就立即读取本目标 payload、执行单文件事务并删除已提交文件，不再等待剩余头部；第一遍完成后才在第二遍处理其他来源。两遍保留各自的 ULID 顺序，共用原来的 50 个文件 / 300 ms 预算和事务/删除顺序；没有加长超时，也没有跨调用的内存游标依赖。
+
+新增 `ingest::pending(&Store, &Spool, source, since, budget) -> Pending`，供 2e 使用。数据库目标取 Spool 的词法路径，Store 仍须用同一个 `database_path` 结果打开；source 对应头部的声明来源，时间窗为 `created_at >= since`（包含起点，参数须为统一 UTC 毫秒格式）。排除 `spool_ops` 中已提交但未删除的操作后，只要找到一条确定匹配的文件便返回 `Yes`；完整扫描未发现匹配返回 `No`；读取/SQL 错误、无法辨认的头部或 payload、非法时间及预算耗尽返回 `Unknown`。调用者应对 Unknown 按 hook 错误放行策略处理，不能当作“没有”。
+
+查询只观察文件和数据库，不写记录、不拒收、不删除文件；目录枚举、打开和读取继续相对已核验的目录句柄，目标路径不匹配时不读正文。内部候选结果区分正常跳过与未知；目录枚举超时明确报告未完成，不再把半份列表作为完整结果返回。文件读取和 SQL 锁等待使用查询剩余预算，结束后恢复连接原有 busy timeout。该接口不提供跨文件系统与数据库的原子快照，也不锁住并发发布/收取。
+
+**验证**：只新增并运行两类测试，共 3 项。`priority_backlog_makes_progress_on_every_collection` 用 `Spool::publish` 写入 4,000 个规范 ULID、合法时间、同一已知来源的 `nothing_new` 文件：修改前确认第一轮 `processed=0` 的有效 RED；修改后连续三轮均处理 1–50 个，每轮重新打开 Spool，核对待收取数持续减少、确认数增加、处理 ID 按 ULID 前进。两项 `pending_query_*` 测试先确认缺少查询行为的 RED，再验证 Yes / No / Unknown，包括其他来源、窗口前/起点/起点后、不同数据库目标且 payload 损坏、已提交未删除、tmp 和链接、目录路径被替换但原句柄继续使用，以及损坏头部/payload、文件无读权限、SQL 读取错误、零预算和读取途中耗尽正预算；同时检查查询不写库、不删改文件及 busy timeout 恢复。一次夹具中生成时间早于固定窗口起点的问题已改为显式合成时间，不计作有效 RED。
+
+最终 `cargo test --all-targets` 一次通过（save 18、scope/facts 5、store 17、probe 4，共 44 项），`cargo clippy --all-targets -- -D warnings` 一次通过；格式化与 `git diff --check` 通过。所有命令均前台等待结束，Cargo 使用指定共享编译目录；测试使用临时 HOME / XDG_STATE_HOME 和显式临时可信根，无真实 agent、真实配置或真实 cairn 数据访问。本次仅修改 `ingest.rs`、`spool.rs`、`tests/save.rs` 和本任务文件；未改 DESIGN、地基模块或表结构，未合并、未推送。
