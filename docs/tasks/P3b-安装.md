@@ -88,3 +88,13 @@
 
 - 未运行真实 agent，未在真实 HOME 安装 / 卸载，未读写真实工具配置、会话、工具记忆或 cairn 数据库；未改 config.toml、sandbox / approval、表结构、原模块既有行为、README、HANDOFF 或 DESIGN。
 - 未合并 main、未推送、未清理主控 worktree / agent。无新增待主控决定事项；后续交叉审查、合并及真实环境安装由主控按原流程推进。
+
+## 返工记录
+
+2026-10-05，按主控转交的交叉审查 R1–R3 返工；主仓库的交叉审查文件只读，未修改。
+
+- **R1**：认领前先检查引号和转义，仅接受无 shell 运算符或展开的字面量单词，再核对绝对路径、`cairn` 文件名及恰好两个参数 `hook <agent>`。未引用的控制符、通配符、变量/命令展开、注释或附加参数均不认领；合法引号中的空格、单引号仍支持。install、uninstall、status 共用这条认领规则，save 权限条目的路径也使用相同的字面量检查。回归覆盖审查中的 `/usr/bin/true;/opt/user/cairn hook claude`、相关运算符/展开/注释，并验证两种 agent 的配置原文保留和 status 不误认。
+- **R2**：在合并入口递归检查所有对象的原始成员，按解码后的键检测重复；重复时报 `duplicate object key`，在配置、备份、目录或软链接写入前退出。回归覆盖审查原文、数组内嵌对象及 Unicode 转义后重名的键，确认 install/uninstall 均拒绝，原文件字节及权限不变，没有新增文件、备份、目录或链接。
+- **R3**：保持现有清理行为：删除最后一条 cairn entry 时，清理随之为空的事件数组、hooks 对象、allow 数组和 permissions 对象，不区分空容器原先存在还是安装新增。因此安装/卸载的“等价”指 hook 和权限语义等价，不保证原有空容器的结构往返不变。已补审查中的 `{"hooks":{"Stop":[]},"permissions":{"allow":[]},"theme":"dark"}` 往返用例，断言最终仅剩 `{"theme":"dark"}`；没有 cairn 条目时直接卸载仍保留原有空容器。
+- **验证**：R1 首次因 status 将复合命令认成自身 handler 而失败，R2 首次因 install 接受重复键而失败，修复后转绿；R3 为既有行为刻画，不制造 RED。`cargo test --test install review_r` 的 3 项回归通过，均使用已有隔离 HOME / XDG / 工具配置目录夹具，未执行合成 hook 命令。最终 `CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo test --all-targets` 一次通过，共 102 项；`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo clippy --all-targets -- -D warnings` 一次通过。所有命令均等待前台进程结束。
+- **范围**：仅修改命令认领、安装 JSON 检查、上述回归和本记录；无新依赖，不改变 R3 清理行为、DESIGN 或已确认的 SQLite 辅助文件边界。未读写真实配置/会话/数据，未运行真实 agent，未修改主仓库审查文件，未合并或推送；无新增待主控决定事项。

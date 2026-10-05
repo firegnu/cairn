@@ -1,8 +1,61 @@
 //! Render changed containers while retaining original JSON member/value text.
 //! serde parses JSON; this module only splices already validated raw fragments.
 use crate::cli::Result;
+use serde::de::{Deserialize, Deserializer, Error, MapAccess, Visitor};
 use serde_json::{value::RawValue, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Reject duplicate keys before merging: maps alone lose their original order
+/// and cannot safely reconstruct raw fragments containing duplicate members.
+pub(crate) fn parse(raw: &str) -> Result<Value> {
+    // Validate syntax and serde's nesting limit before the raw-value traversal.
+    let value = serde_json::from_str(raw)?;
+    unique_keys(raw)?;
+    Ok(value)
+}
+
+fn unique_keys(raw: &str) -> serde_json::Result<()> {
+    match raw.trim_start().as_bytes().first() {
+        Some(b'{') => {
+            serde_json::from_str::<UniqueObject>(raw)?;
+        }
+        Some(b'[') => {
+            for value in serde_json::from_str::<Vec<&RawValue>>(raw)? {
+                unique_keys(value.get())?;
+            }
+        }
+        _ => (),
+    }
+    Ok(())
+}
+
+struct UniqueObject;
+impl<'de> Deserialize<'de> for UniqueObject {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        struct ObjectVisitor;
+        impl<'de> Visitor<'de> for ObjectVisitor {
+            type Value = UniqueObject;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an object with unique keys")
+            }
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut keys = BTreeSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !keys.insert(key.clone()) {
+                        return Err(A::Error::custom(format!("duplicate object key: {key:?}")));
+                    }
+                    let value = map.next_value::<&RawValue>()?;
+                    unique_keys(value.get()).map_err(A::Error::custom)?;
+                }
+                Ok(UniqueObject)
+            }
+        }
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
 
 pub(crate) fn render(raw: &str, new: &Value) -> Result<String> {
     let old: Value = serde_json::from_str(raw)?;

@@ -353,3 +353,111 @@ fn uninstall_without_owned_entries_leaves_even_empty_settings_unchanged() {
         1
     );
 }
+
+#[test]
+fn review_r1_shell_commands_remain_user_owned() {
+    let f = Fixture::new();
+    for agent in ["claude", "codex"] {
+        let commands = [
+            format!("/usr/bin/true;/opt/user/cairn hook {agent}"),
+            format!("/usr/bin/true&/opt/user/cairn hook {agent}"),
+            format!("/usr/bin/true|/opt/user/cairn hook {agent}"),
+            format!("/opt/$USER/cairn hook {agent}"),
+            format!("\"/opt/$USER/cairn\" hook {agent}"),
+            format!("/opt/`whoami`/cairn hook {agent}"),
+            format!("/opt/*/cairn hook {agent}"),
+            format!("/opt/user/cairn hook {agent} # user suffix"),
+        ];
+        let handlers: Vec<_> = commands
+            .iter()
+            .map(|command| {
+                format!(
+                    r#"{{ "type":"command", "command":{}, "timeout":17 }}"#,
+                    serde_json::to_string(command).unwrap()
+                )
+            })
+            .collect();
+        let original = format!(
+            r#"{{"hooks":{{"Stop":[{{"hooks":[{}]}}]}},"theme":"dark"}}"#,
+            handlers.join(",")
+        );
+        f.seed(agent, &original);
+        let status: Value = serde_json::from_str(&f.ok(&["status", "--json"])).unwrap();
+        assert_eq!(status["agents"][agent]["events"]["Stop"], false);
+        f.ok(&["uninstall", "--agent", agent, "--yes"]);
+        assert_eq!(fs::read_to_string(f.config(agent)).unwrap(), original);
+        f.ok(&["install", "--agent", agent, "--yes"]);
+        let installed = fs::read_to_string(f.config(agent)).unwrap();
+        for handler in &handlers {
+            assert!(installed.contains(handler));
+        }
+        f.ok(&["uninstall", "--agent", agent, "--yes"]);
+        let removed = fs::read_to_string(f.config(agent)).unwrap();
+        for handler in &handlers {
+            assert!(removed.contains(handler));
+        }
+        assert_eq!(
+            serde_json::from_str::<Value>(&removed).unwrap(),
+            serde_json::from_str::<Value>(&original).unwrap()
+        );
+        let quoted_command = format!(r#"'/old path/it'\''s/cairn' hook {agent}"#);
+        let quoted = serde_json::json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":quoted_command}]}]},"theme":"dark"});
+        f.seed(agent, &quoted.to_string());
+        let status: Value = serde_json::from_str(&f.ok(&["status", "--json"])).unwrap();
+        assert_eq!(status["agents"][agent]["events"]["Stop"], true);
+        f.ok(&["uninstall", "--agent", agent, "--yes"]);
+        assert_eq!(value(&f.config(agent)), serde_json::json!({"theme":"dark"}));
+    }
+}
+
+#[test]
+fn review_r2_duplicate_keys_are_rejected_before_any_write() {
+    for original in [
+        r#"{"theme":"light","hooks":{},"theme":"dark"}"#,
+        r#"{"hooks":{},"custom":[{"nested":{"key":1,"key":2}}]}"#,
+        r#"{"hooks":{},"custom":{"key":1,"\u006bey":2}}"#,
+    ] {
+        for agent in ["claude", "codex"] {
+            let f = Fixture::new();
+            f.seed(agent, original);
+            for verb in ["install", "uninstall"] {
+                let output = f.run(&[verb, "--agent", agent, "--yes"]);
+                assert!(
+                    !output.status.success(),
+                    "{verb} accepted duplicate keys: {original}"
+                );
+                assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate object key"));
+                assert_eq!(fs::read_to_string(f.config(agent)).unwrap(), original);
+                assert_eq!(
+                    fs::metadata(f.config(agent)).unwrap().permissions().mode() & 0o777,
+                    0o640
+                );
+                assert_eq!(fs::read_dir(f.0.path()).unwrap().count(), 2);
+                assert_eq!(fs::read_dir(f.path("project")).unwrap().count(), 0);
+                assert_eq!(
+                    fs::read_dir(f.config(agent).parent().unwrap())
+                        .unwrap()
+                        .count(),
+                    1
+                );
+                assert!(!f.path("data").exists());
+                assert!(!f.path("state").exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn review_r3_round_trip_cleans_empty_hook_and_permission_containers() {
+    let f = Fixture::new();
+    f.seed(
+        "claude",
+        r#"{"hooks":{"Stop":[]},"permissions":{"allow":[]},"theme":"dark"}"#,
+    );
+    f.ok(&["install", "--agent", "claude", "--yes"]);
+    f.ok(&["uninstall", "--agent", "claude", "--yes"]);
+    assert_eq!(
+        value(&f.config("claude")),
+        serde_json::json!({"theme":"dark"})
+    );
+}

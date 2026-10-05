@@ -59,7 +59,7 @@ fn name(agent: Agent) -> &'static str {
     }
 }
 pub(crate) fn own_command(command: &str, agent: Agent) -> bool {
-    shlex::split(command).is_some_and(|words| {
+    literal_words(command).is_some_and(|words| {
         words.len() == 3
             && words[1] == "hook"
             && words[2] == name(agent)
@@ -69,10 +69,49 @@ pub(crate) fn own_command(command: &str, agent: Agent) -> bool {
                 .is_some_and(|n| n == "cairn")
     })
 }
+
+// shlex splits words but does not reject shell operators or expansions. Accept
+// only literal words; quotes and escaped characters can still name literal paths.
+fn literal_words(command: &str) -> Option<Vec<String>> {
+    let mut quote = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(c, '\n' | '\r' | '\0') {
+            return None;
+        }
+        match (quote, c) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('\''), _) => (),
+            (Some('"'), '$' | '`') => return None,
+            (None, '\'' | '"') => quote = Some(c),
+            (
+                None,
+                ';' | '&' | '|' | '<' | '>' | '(' | ')' | '$' | '`' | '*' | '?' | '[' | ']' | '{'
+                | '}' | '~' | '#' | '!',
+            ) => return None,
+            (_, '\\')
+                if quote.is_none()
+                    || chars
+                        .peek()
+                        .is_some_and(|c| matches!(c, '$' | '`' | '"' | '\\')) =>
+            {
+                if matches!(chars.next(), None | Some('\n' | '\r' | '\0')) {
+                    return None;
+                }
+            }
+            _ => (),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    shlex::split(command)
+}
+
 fn own_permission(rule: &Value) -> bool {
     rule.as_str()
         .and_then(|s| s.strip_prefix("Bash(")?.strip_suffix(" save:*)"))
-        .and_then(shlex::split)
+        .and_then(literal_words)
         .is_some_and(|words| {
             words.len() == 1
                 && Path::new(&words[0]).is_absolute()
@@ -107,7 +146,7 @@ pub(crate) fn read_config(path: &Path) -> Result<Option<String>> {
 }
 
 fn merge(raw: &str, paths: &Paths, agent: Agent, uninstall: bool) -> Result<String> {
-    let mut config: Value = serde_json::from_str(raw)?;
+    let mut config = crate::install_json::parse(raw)?;
     let object = config.as_object_mut().ok_or("配置必须是 JSON 对象")?;
     let command = paths.command(agent)?;
     if !uninstall || object.contains_key("hooks") {
