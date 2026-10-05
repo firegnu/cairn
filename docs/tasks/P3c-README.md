@@ -82,3 +82,10 @@
 ### 主控决定
 
 - 无。
+
+## 主控审查
+
+2026-10-05，cairn/main。结论：通过，已合并。
+- 只改了 README 和完成记录；README 内容与代码一致，覆盖安装、接入、采用、日常命令、数据、禁用、卸载与 D7 说明；`git diff --check` 通过。
+- 核对真实环境：真实 `~/.local/share/cairn`、`~/.local/state/cairn`、`~/.cargo/bin/cairn` 不存在，真实 Claude / Codex 配置无 cairn 条目。
+- 发现：暂存区取 `DARWIN_USER_TEMP_DIR`，不受 `TMPDIR` 影响，隔离走查在真实私有临时目录留下了空目录 `cairn-spool/7262111286db64b8/`（无文件）。主控在 README 补了说明（同分支提交）；该空目录删不删交用户决定。
