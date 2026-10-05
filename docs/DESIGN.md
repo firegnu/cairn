@@ -215,19 +215,20 @@ CREATE TABLE spool_ops (                                                -- 已�
 用户 2026-10-05 选定的写入路线（第一阶段 C 补测通过；`--yolo` 只用于实测对照，D11 不变）。
 
 **位置与隔离**
-- 可信根：macOS 上取 `confstr(_CS_DARWIN_USER_TEMP_DIR)`（即 `getconf DARWIN_USER_TEMP_DIR`）。补测确认 Codex 默认沙箱里 shell 的 `$TMPDIR` 与它逐字相同，且在沙箱可写范围内。取不到时退回 `$TMPDIR`，同样要满足下面的可信根条件，否则报错。
+- 可信根：macOS 上取 `confstr(_CS_DARWIN_USER_TEMP_DIR)`（即 `getconf DARWIN_USER_TEMP_DIR`）。补测确认 Codex 默认沙箱里 shell 的 `$TMPDIR` 与它逐字相同，且在沙箱可写范围内。取不到时退回 `$TMPDIR`。不论哪一个，都要满足下面"文件安全"里的可信根条件，否则报错，不使用。
 - 暂存区按目标状态库分命名空间：`<可信根>/cairn-spool/<ns>/`，`ns` 是"目标数据库路径（§6.1，按 `XDG_STATE_HOME` / `HOME` 推出，词法规范化，不要求已存在）"的 SHA-256 前 16 位十六进制。save、hook、用户命令用同一条规则算 `ns`，save 不需要打开数据库。暂存文件里也写上目标数据库路径。
 - 收取者只处理自己的 `ns` 目录，文件里的目标路径对不上就跳过，不读正文、不拒收、不删除。这样隔离 `XDG_STATE_HOME` 的测试和真实状态库互不干扰。
 - 首版只支持 macOS（D3：本机单机）。其他平台的暂存位置以后再定。
 
 **文件安全**
-- `cairn-spool/` 和 `<ns>/` 不存在就用 0700 创建；已存在的，用 `lstat` 检查：必须是真目录（不是符号链接）、属主是当前 uid、权限不宽于 0700。不满足就报错，不使用。
-- 之后的文件操作都相对已打开的 `<ns>` 目录句柄进行（`openat` / `renameat` / `unlinkat`），不再按完整路径重新解析，避免检查之后目录被换掉。
+- **可信根条件**：用 `O_DIRECTORY` 打开根目录，对打开后的句柄 `fstat`：是目录、属主是当前 uid、组和其他人都没有写权限。不满足就报错。
+- **逐层打开**：从根句柄开始，用 `openat(父句柄, 名字, O_DIRECTORY | O_NOFOLLOW)` 依次打开 `cairn-spool`、`<ns>`；不存在（`ENOENT`）就 `mkdirat(父句柄, 名字, 0700)` 后再这样打开一次。每打开一层，都对**打开后的句柄** `fstat`：是目录、属主是当前 uid、权限不宽于 0700。安全判定以句柄上的 `fstat` 为准，不用 `lstat` 加路径打开的组合，因此检查和使用之间没有空档；中间某一层被换成符号链接时，`O_NOFOLLOW` 让打开直接失败。
+- 拿到的 `<ns>` 目录句柄留着，之后的文件操作都相对它进行（`openat` / `renameatx_np` / `unlinkat`），不再按路径重新解析。
 - 收取的条目必须是普通文件（`O_NOFOLLOW` 打开后 `fstat` 核对类型和属主），符号链接和其他类型一律跳过，不读、不删。文件名里的 ID 必须和内容里的 ID 一致，否则拒收。
 
 **写入（`cairn save` 一侧）**
 - 一次 save 就是一个"暂存操作"，生成一个 ULID 作操作 ID（`op_id`）。有正文时它同时用作记录 ID。
-- 先用 `O_CREAT | O_EXCL | O_NOFOLLOW`、0600 创建 `.<op_id>.tmp`，写完 `fsync`，再改名成 `<op_id>.json`。改名用不覆盖已有文件的方式（`renameat` 之前目标名必须不存在；ULID 冲突时报错）。收取方只认 `.json`，不会读到写了一半的文件。
+- 先用 `O_CREAT | O_EXCL | O_NOFOLLOW`、0600 创建 `.<op_id>.tmp`，写完 `fsync`，再改名成 `<op_id>.json`。改名用原子的不覆盖方式：`renameatx_np(ns 句柄, .tmp 名, ns 句柄, .json 名, RENAME_EXCL)`，目标已存在时返回 `EEXIST`，save 报错。系统不支持 `RENAME_EXCL` 时直接报错，不退回"先查不存在、再普通改名"（普通 `rename` / `renameat` 会覆盖已存在的目标）。收取方只认 `.json`，不会读到写了一半的文件。
 - 文件内容：格式版本号、`op_id`、目标数据库路径、声明的来源（可能为空）、cwd、项目键、工作线、分支、kind、正文或 `nothing_new`、`supersedes` 列表、程序采集的事实、`created_at`。
 - save 不打开数据库：沙箱里连 WAL 模式的只读打开都要写 `-shm`，不可靠。
 
