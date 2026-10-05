@@ -60,3 +60,13 @@
 
 ## 做完
 在本文件末尾追加「## 完成记录」（在你的分支里提交）：做了什么、验证了什么、拿主意的地方、没做的事，各几句话。回复里只写这几样，加上有没有要主控决定的事。命令都在前台跑完，全部做完后，回复最后一行写 DONE。
+
+## 完成记录
+
+2026-10-05，cairn/dev-scope。
+
+- **做了什么**：实现 `scope::Git`，通过 `Git::default()`（每条命令 2 秒）或 `Git::new(Duration)` 创建；`resolve(&Path)` 返回规范化的项目键、工作线和 `is_git`。`collect(&Path)` 返回可序列化的 `Option<GitFacts>`，包含 HEAD、分支、本地 upstream 名与 ahead/behind、三类工作区计数及 Unix 毫秒采集时间。`compare(&GitFacts, &Path)` 返回 §11.2 的固定文字行。共用 Git 调用器加 `--no-optional-locks`，超时杀掉并回收自己创建的子进程；禁用交互、fsmonitor 和隐式 lazy fetch，不发起联网操作。
+- **验证了什么**：只新增 `crates/cairn/tests/scope_facts.rs` 的五个测试，分别覆盖子目录/worktree 作用域、历史分叉措辞、无 remote 的本地 upstream ahead/behind、非 Git 目录、Git 超时。五项均先得到行为断言失败或未实现行为导致的错误，再实现并通过；途中一次补丁语法错误已修正，不计入 RED。合成 Git 仓库位于临时目录，测试进程串行隔离 HOME、XDG 目录和 Git 全局/系统配置，结束后恢复环境。upstream 测试还通过 JSON 往返传递记录事实。最终 `cargo test --all-targets` 跑一次并通过（本任务 5 项、原探针 4 项）；`cargo clippy --all-targets -- -D warnings` 跑一次并通过。所有命令均等待前台完成，Cargo 使用指定共用编译目录。
+- **拿主意的地方**：用标准库轮询子进程并设截止时间；匿名临时文件接收 stdout/stderr，避免管道塞满或读线程拖延超时。只有 C locale 下明确的“未发现仓库”诊断可退回非 Git 作用域，其余 Git 失败向调用方传递。非 Git 目录的事实返回 `None`；空仓库 HEAD 和 detached 分支分别为 `None`；记录时没有 HEAD 就不生成 HEAD 对比行。upstream 名存在但本地 ref 不存在时，保留名字，`divergence` 为 `None`，不生成虚构的 ahead/behind 文字。工作区按 porcelain v2 的 NUL 分隔条目计数，重命名只计一个条目。没有更改 DESIGN。
+- **没做的事**：没有读写数据库，没有修改 store/lib/main/tools 或其他设计文档；没有读取真实会话、工具记忆或用户数据库，没有改真实配置，也没有启动 agent、fetch、合并或推送。按任务限制，没有增加空仓库、detached、脏工作区计数、缺失 upstream ref、缺失 Git 或非超时 Git 错误的专项测试，这些是当前验证边界。
+- **待主控决定**：无阻塞实现的问题。上述未专项验证的边界是否在后续集成阶段补测，由主控决定；本分支只提交供主控审查。
