@@ -344,7 +344,7 @@ save 进程里：
 
 ### 8.5 用户命令
 
-- `correct`：插入 kind=correction 的记录。显示原记录时，在后面附上最新的更正，标明是谁、什么时候更正的。
+- `correct`：插入 kind=correction 的记录。显示原记录时，在后面附上最新的更正，标明是谁、什么时候更正的。首版只允许更正 checkpoint：要再改，就对原记录再写一条更正（显示取最新一条），不支持"更正的更正"，目标不是 checkpoint 时拒绝。
 - `retract`：插入 kind=retraction 的记录。被撤回的记录默认不显示，`list --all` 能看到。
 - `restore`：撤销取代或撤回。
 - `delete`：先交互确认，或者带 `--yes`。然后把正文置空，执行 WAL checkpoint(TRUNCATE)，输出被删记录还剩下的元数据。
