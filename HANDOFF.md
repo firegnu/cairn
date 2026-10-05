@@ -12,11 +12,12 @@
 
 ## 下一步
 
-1. 端到端冒烟测试（主控建议做，用户尚未确认）：在 p1-lab 的两个临时仓库里用会话级参数接真实 `cairn hook`，开 Claude、Codex 各一个 `cairn/test-*`（轻档），走 adopt → 注入 → save → Stop → 新会话可见、跨工具接续；不写真实配置；Codex 可能需用户在 `/hooks` 再信任一次。
-2. 阶段 4 试点：经用户同意后在真实环境 `cargo install --path crates/cairn` 并 `cairn install --agent claude|codex`，用户挑项目 `adopt`。
+1. 阶段 4 试点（等用户同意）：经用户同意后在真实环境 `cargo install --path crates/cairn` 并 `cairn install --agent claude|codex`，用户挑项目 `adopt`。
 
 ## 悬而未决
 
+- 端到端冒烟测试已完成（`docs/调研/端到端冒烟测试.md`）：Codex 通过，Claude 条件通过。S1-1：项目规则限制命令时 Claude 可能不确认、续跑后也不确认（cairn 如实记录，不无限续跑）；是否调整注入措辞，试点后由用户决定。
+- 冒烟遗留物：`p1-lab/smoke/`；私有临时目录下空的 `cairn-spool/d7de8e374f1b8ca2/`；`p1-lab` 两个仓库里各两个未跟踪的合成文件。删不删由用户定。
 - 3c 走查在真实私有临时目录留下空目录 `cairn-spool/7262111286db64b8/`（无文件），删不删由用户定。
 - 真实安装（`cairn install`）必须等用户明确同意；会改 `~/.claude/settings.json`、`~/.codex/hooks.json` 并建 `~/.local/share/cairn/bin/cairn` 软链接，Codex 需在 `/hooks` 信任。
 - DESIGN 在阶段 2 中的修订：收取必须向前推进（9585ea1）；resume/fork 补注入规则与回合起点约定（a5c9141）；无 turn_key 不续跑（9f6f20e）；correct 只以 checkpoint 为目标（afd2212）；取代 / 撤回 / 恢复按 rowid 判定先后、不执行 VACUUM（a520af2）。
