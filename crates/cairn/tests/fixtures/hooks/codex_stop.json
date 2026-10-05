@@ -1,0 +1,10 @@
+{
+  "hook_event_name": "Stop",
+  "session_id": "synthetic-codex-session",
+  "cwd": "/synthetic/project",
+  "transcript_path": "/synthetic/never-open-transcript",
+  "model": "synthetic-model",
+  "turn_id": "synthetic-codex-turn",
+  "stop_hook_active": false,
+  "last_assistant_message": "PRIVATE-ANSWER-MARKER-8R2"
+}

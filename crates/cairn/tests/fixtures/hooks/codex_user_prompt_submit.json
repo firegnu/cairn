@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "synthetic-codex-session",
+  "cwd": "/synthetic/project",
+  "transcript_path": "/synthetic/never-open-transcript",
+  "model": "synthetic-model",
+  "turn_id": "synthetic-codex-turn",
+  "prompt": "PRIVATE-PROMPT-MARKER-4Q7"
+}

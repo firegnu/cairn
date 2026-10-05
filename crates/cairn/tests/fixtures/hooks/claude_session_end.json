@@ -1,0 +1,8 @@
+{
+  "hook_event_name": "SessionEnd",
+  "session_id": "synthetic-claude-session",
+  "cwd": "/synthetic/project",
+  "transcript_path": "/synthetic/never-open-transcript",
+  "model": "synthetic-model",
+  "reason": "prompt_input_exit"
+}

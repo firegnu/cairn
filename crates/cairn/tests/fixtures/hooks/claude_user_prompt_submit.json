@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "synthetic-claude-session",
+  "cwd": "/synthetic/project",
+  "transcript_path": "/synthetic/never-open-transcript",
+  "model": "synthetic-model",
+  "prompt_id": "synthetic-claude-turn",
+  "prompt": "PRIVATE-PROMPT-MARKER-4Q7"
+}
