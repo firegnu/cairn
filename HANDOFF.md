@@ -9,6 +9,8 @@
 - **阶段 3（接入）已完成**：3a hook 适配（`hook.rs`，`cairn hook claude|codex`）、3b install / uninstall / status（`install.rs`、`status.rs`）均经交叉审查合并；3c 仓库根 `README.md` 已合并。阶段 1 探针已删除。阶段 3 的"建议验证"经用户同意写成验收条件。main 上 102 项测试通过。
 - **阶段 2（核心）已完成**：正式 crate 在 `crates/cairn`（用户定）。已合并：2a 存储（`store.rs`、`store/schema.rs`）、2b 作用域与 Git 事实（`scope.rs`、`facts.rs`）、2c adopt / save / 暂存区收取（`adopt.rs`、`save.rs`、`spool.rs`、`ingest.rs`、`cli.rs`）、2d 注入渲染与 `cairn show`（`render.rs`、`session.rs`）、2e 回合判定（`turn.rs`）、2f 用户命令（`commands.rs`）。全部经交叉审查，main 上 86 项测试通过。
 - 阶段 2 的任务书照用户同意，把实施计划的"建议验证"写成验收条件。
+- **端到端冒烟测试已完成**（`docs/调研/端到端冒烟测试.md`）：真实 Claude Code、Codex 主路径走通（Codex 通过、Claude 条件通过，无已证实代码缺陷）。仓库已公开：https://github.com/firegnu/cairn（暂不加许可证，用户决定）。
+- 现在没有开着的 dev / test agent，没有未清理的 worktree 或分支。
 
 ## 下一步
 
