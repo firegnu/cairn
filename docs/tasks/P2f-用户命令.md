@@ -91,3 +91,20 @@ restore 的排序不再只依赖当前墙钟：在 IMMEDIATE 事务中读取目�
 随后 `cargo test --all-targets` 与 `cargo clippy --all-targets -- -D warnings` 各运行一次，均通过。全量共 85 项：cmds 12、render/session 12、save 19、scope/facts 5、store 17、turn 16、probe 4。所有命令均前台等待完成，Cargo 使用指定共享 target；测试继续使用临时 HOME / XDG_STATE_HOME 和显式临时暂存可信根，没有新增其他测试或扩大验证范围。
 
 **范围**：本次返工仅修改 `commands.rs`、`tests/cmds.rs` 和本任务文件；DESIGN 变更来自合并 main。未改 render 排序、禁改模块、真实配置或数据，未写主仓库审查文件，未委派 agent、未合并回 main、未推送。没有需要主控另作决定的事项。
+
+## 第二轮返工记录
+
+2026-10-05，按复核剩余一条“必须改”和主控最终决定返工。已只读查看主仓库审查文件的「复核意见」；先执行 `git merge main`，合并提交 `d537075` 带入设计提交 `a520af2`，采用 DESIGN §6.2 的入库顺序规则。
+
+**修改**：在 `render::records` 的共享查询中，restore 与取代 / 撤回的先后比较改为 `records.rowid`；存在多个有效取代时，也按取代记录 rowid 选择最后入库的一条。只有较后提交的 restore 能撤销较早的动作，旧 restore 不会撤销之后入库的新取代。list、show、export 与 SessionStarted 注入继续共用该查询，记录展示及最新更正的时间排序没有改动。
+
+`commands.rs` 移除上一轮最大动作时间加 1 ms 的全部逻辑及相关 import，restore / retract 恢复使用正常当前时间；校验与追加仍在同一个 IMMEDIATE 事务内完成，顺序由 rowid 表达。没有改表结构、写入历史行或执行 VACUUM；上一轮“correct 只允许 checkpoint”限制保留。
+
+**验证**：只定点运行以下两个回归，均有本轮有效 RED→GREEN：
+
+- 新增 `supersession_committed_after_restore_is_not_cancelled_by_that_restore`：合成撤回时间领先，restore 后通过库级 SessionStarted 将原记录注入合成来源，再由该来源 save --supersedes。先核对新操作已 ingested、取代关系确实存在，然后复现原实现 `replaced_by=null`；修复后核对 show 正确标记新取代，默认 list、export、无参数 show 与实际注入都隐藏旧正文，新正文正常显示；随后再 restore 可以撤销这次新取代。未启动真实 agent。
+- 保留 `restore_orders_after_committed_actions_even_when_wall_clock_is_behind` 的倒序时间、实际恢复、历史不变和后续撤回断言。按新设计把“恢复时间等于未来动作加 1 ms”改为“恢复时间位于命令调用前后的当前时间之间”，先复现旧实现仍把时间推到未来，再转为 GREEN。后续撤回即使时间更早也生效；再次恢复后，早先动作即使改成极远未来时间也不能重新生效，无可撤销动作时仍拒绝且不追加。只修改合成库时间，不改系统时钟、不靠 sleep。
+
+随后 `cargo test --all-targets` 和 `cargo clippy --all-targets -- -D warnings` 各运行一次，均通过；全量 86 项（cmds 13、render/session 12、save 19、scope/facts 5、store 17、turn 16、probe 4）。渲染固定样例逐字比对通过，`tests/render_session.rs` 及期望文本没有修改。所有命令前台等待完成，Cargo 使用指定共享 target；测试仍使用临时 HOME / XDG_STATE_HOME 和显式临时暂存可信根，未扩大验证范围。
+
+**范围**：本轮仅修改授权的 `render.rs` 动作排序、`commands.rs`、`tests/cmds.rs` 和本任务文件，DESIGN 来自合并 main。未改其他禁改模块或真实配置与数据，未写主仓库审查文件、未委派 agent、未合并回 main、未推送。没有需要主控另作决定的事项。

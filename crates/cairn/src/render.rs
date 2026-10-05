@@ -59,19 +59,19 @@ impl Record {
     }
 }
 
-// restore targets the original record, cancelling earlier supersessions and
-// retractions. Later actions remain effective. IDs break equal-time ties.
+// Restore cancels only supersessions/retractions committed before it. Records'
+// rowids retain that order: rows are never removed and cairn never runs VACUUM.
 pub(crate) fn records(connection: &Connection, project_key: &str) -> Result<Vec<Record>> {
     let mut stmt = connection.prepare(
         "SELECT r.id,r.line_path,r.branch,r.source_id,r.kind,r.target_id,r.body,r.facts,r.created_at,r.deleted_at,
         (SELECT s.record_id FROM supersessions s JOIN records n ON n.id=s.record_id
          WHERE s.target_id=r.id AND NOT EXISTS (
              SELECT 1 FROM records x WHERE x.kind='restore' AND x.target_id=r.id
-             AND (x.created_at,x.id)>(n.created_at,n.id))
-         ORDER BY n.created_at DESC,n.id DESC LIMIT 1),
+             AND x.rowid>n.rowid)
+         ORDER BY n.rowid DESC LIMIT 1),
         EXISTS (SELECT 1 FROM records t WHERE t.kind='retraction' AND t.target_id=r.id
          AND NOT EXISTS (SELECT 1 FROM records x WHERE x.kind='restore' AND x.target_id=r.id
-             AND (x.created_at,x.id)>(t.created_at,t.id))), r.project_id
+             AND x.rowid>t.rowid)), r.project_id
         FROM records r JOIN projects p ON p.id=r.project_id WHERE p.key=?1
         ORDER BY r.created_at DESC,r.id DESC",
     )?;

@@ -313,6 +313,101 @@ fn correct_rejects_non_checkpoint_targets_without_writing() {
 }
 
 #[test]
+fn supersession_committed_after_restore_is_not_cancelled_by_that_restore() {
+    use cairn::session::{self, SessionStarted, StartKind};
+    use chrono::{Duration as Delta, SecondsFormat, Utc};
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let id = f.queued("## 停点\n旧记录的独有正文");
+    let retraction = f.run(&["retract", &id], "").unwrap();
+    let retraction = retraction.split_whitespace().nth(1).unwrap();
+    let future = (Utc::now() + Delta::hours(1)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let s = f.store();
+    s.connection()
+        .execute(
+            "UPDATE records SET created_at=?2 WHERE id=?1",
+            [retraction, &future],
+        )
+        .unwrap();
+    f.run(&["restore", &id], "").unwrap();
+    let restored = f.show(&id);
+    assert_eq!(restored["retracted"], false);
+    assert!(restored["replaced_by"].is_null());
+
+    let event = SessionStarted {
+        disabled: false,
+        agent: "codex",
+        session_id: "synthetic-p2f-recheck",
+        cwd: &f.cwd(),
+        start_kind: StartKind::Startup,
+        now: Utc::now(),
+    };
+    let injected = session::start(&event, &f.db(), f.root.path())
+        .unwrap()
+        .unwrap();
+    assert!(injected.record_ids.contains(&id));
+    let saved = f
+        .run(
+            &[
+                "save",
+                "--source",
+                "codex:synthetic-p2f-recheck",
+                "--supersedes",
+                &id,
+            ],
+            "## 停点\n新取代记录的独有正文",
+        )
+        .unwrap();
+    let replacement = saved.split_whitespace().nth(1).unwrap();
+    let shown = f.show(&id); // Collect the replacement through the public command.
+    let outcome: String = s
+        .connection()
+        .query_row(
+            "SELECT outcome FROM spool_ops WHERE op_id=?1",
+            [replacement],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "ingested");
+    let linked: bool = s
+        .connection()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM supersessions WHERE record_id=?1 AND target_id=?2)",
+            [replacement, &id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(linked);
+    assert_eq!(
+        shown["replaced_by"], replacement,
+        "an earlier restore cannot cancel a later committed supersession"
+    );
+    assert!(!f
+        .run(&["list"], "")
+        .unwrap()
+        .lines()
+        .any(|line| line.starts_with(&id)));
+    for text in [
+        f.run(&["show"], "").unwrap(),
+        f.run(&["export"], "").unwrap(),
+    ] {
+        assert!(!text.contains("旧记录的独有正文"));
+        assert!(text.contains("新取代记录的独有正文"));
+    }
+    let injected = session::start(&event, &f.db(), f.root.path())
+        .unwrap()
+        .unwrap();
+    assert!(!injected.record_ids.contains(&id));
+    assert!(injected
+        .record_ids
+        .iter()
+        .any(|record| record == replacement));
+    assert!(!injected.text.contains("旧记录的独有正文"));
+    f.run(&["restore", &id], "").unwrap();
+    assert!(f.show(&id)["replaced_by"].is_null());
+}
+
+#[test]
 fn restore_orders_after_committed_actions_even_when_wall_clock_is_behind() {
     use chrono::{Duration as Delta, SecondsFormat, Utc};
     let f = Fixture::new();
@@ -328,8 +423,6 @@ fn restore_orders_after_committed_actions_even_when_wall_clock_is_behind() {
     let replacement_at = future.to_rfc3339_opts(SecondsFormat::Millis, true);
     let retraction_at =
         (future + Delta::milliseconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true);
-    let expected_restore_at =
-        (future + Delta::milliseconds(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
     s.connection()
         .execute(
             "INSERT INTO supersessions VALUES (?1,?2)",
@@ -350,7 +443,9 @@ fn restore_orders_after_committed_actions_even_when_wall_clock_is_behind() {
     assert_eq!(hidden["retracted"], true);
     assert_eq!(hidden["replaced_by"], replacement);
 
+    let before_restore = cairn::save::now();
     let restored = f.run(&["restore", &id], "").unwrap();
+    let after_restore = cairn::save::now();
     let shown = f.show(&id);
     assert_eq!(
         shown["retracted"], false,
@@ -361,7 +456,12 @@ fn restore_orders_after_committed_actions_even_when_wall_clock_is_behind() {
         "successful restore must undo supersession too"
     );
     let restored_id = restored.split_whitespace().nth(1).unwrap();
-    assert_eq!(f.show(restored_id)["created_at"], expected_restore_at);
+    let restored_record = f.show(restored_id);
+    let restored_at = restored_record["created_at"].as_str().unwrap();
+    assert!(
+        restored_at >= before_restore.as_str() && restored_at <= after_restore.as_str(),
+        "restore must use the current wall clock, not advance it: {restored_at}"
+    );
     assert_eq!(f.show(retraction), retraction_before);
     assert_eq!(f.show(&replacement), replacement_before);
     assert!(f
@@ -371,22 +471,28 @@ fn restore_orders_after_committed_actions_even_when_wall_clock_is_behind() {
         .any(|line| line.starts_with(&id)));
     assert!(f.run(&["show"], "").unwrap().contains("恢复后可见的原记录"));
 
-    // Advancing restore's timestamp must not swallow a subsequent user retraction.
+    // A subsequent retraction must apply even if its wall-clock time is earlier.
     let later_retraction = f.run(&["retract", &id], "").unwrap();
-    assert_eq!(f.show(&id)["retracted"], true);
     let later_id = later_retraction.split_whitespace().nth(1).unwrap();
-    assert!(f.show(later_id)["created_at"].as_str().unwrap() > expected_restore_at.as_str());
+    s.connection()
+        .execute(
+            "UPDATE records SET created_at='2000-01-01T00:00:00.000Z' WHERE id=?1",
+            [later_id],
+        )
+        .unwrap();
+    assert_eq!(f.show(&id)["retracted"], true);
     f.run(&["restore", &id], "").unwrap();
     assert_eq!(f.show(&id)["retracted"], false);
 
-    // A later millisecond outside the canonical four-digit-year format cannot
-    // sort correctly; reject without leaving a source or ineffective restore.
+    // Changing that earlier action's time cannot undo the later restore, even
+    // at the end of the timestamp format. There is no remaining action to undo.
     s.connection()
         .execute(
             "UPDATE records SET created_at='9999-12-31T23:59:59.999Z' WHERE id=?1",
             [later_id],
         )
         .unwrap();
+    assert_eq!(f.show(&id)["retracted"], false);
     let before = f.run(&["list", "--all"], "").unwrap();
     let sources_before: i64 = s
         .connection()
@@ -396,7 +502,7 @@ fn restore_orders_after_committed_actions_even_when_wall_clock_is_behind() {
     assert!(!result.status.success());
     assert_eq!(
         String::from_utf8(result.stderr).unwrap(),
-        "无法生成晚于已提交动作的时间\n"
+        "没有可撤销的取代或撤回\n"
     );
     assert_eq!(f.run(&["list", "--all"], "").unwrap(), before);
     let sources_after: i64 = s
