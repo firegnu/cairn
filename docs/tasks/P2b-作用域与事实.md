@@ -70,3 +70,12 @@
 - **拿主意的地方**：用标准库轮询子进程并设截止时间；匿名临时文件接收 stdout/stderr，避免管道塞满或读线程拖延超时。只有 C locale 下明确的“未发现仓库”诊断可退回非 Git 作用域，其余 Git 失败向调用方传递。非 Git 目录的事实返回 `None`；空仓库 HEAD 和 detached 分支分别为 `None`；记录时没有 HEAD 就不生成 HEAD 对比行。upstream 名存在但本地 ref 不存在时，保留名字，`divergence` 为 `None`，不生成虚构的 ahead/behind 文字。工作区按 porcelain v2 的 NUL 分隔条目计数，重命名只计一个条目。没有更改 DESIGN。
 - **没做的事**：没有读写数据库，没有修改 store/lib/main/tools 或其他设计文档；没有读取真实会话、工具记忆或用户数据库，没有改真实配置，也没有启动 agent、fetch、合并或推送。按任务限制，没有增加空仓库、detached、脏工作区计数、缺失 upstream ref、缺失 Git 或非超时 Git 错误的专项测试，这些是当前验证边界。
 - **待主控决定**：无阻塞实现的问题。上述未专项验证的边界是否在后续集成阶段补测，由主控决定；本分支只提交供主控审查。
+
+## 主控审查
+
+2026-10-05，cairn/main。结论：通过，已合并。
+- 只改了允许的文件；"不要做"各条均未触犯；未引入 libgit2，git 调用统一带 `--no-optional-locks`、超时、`LC_ALL=C`，并清掉外层 `GIT_DIR` 等环境变量。
+- 验收 4 条（子目录与 worktree 同项目、HEAD 不在历史的措辞、上游只用本地 ref、非 Git 目录）各有测试，另有超时测试；措辞与 DESIGN §11.2 逐字一致。
+- 重跑 `cargo test --all-targets`（本任务 5 项、探针 4 项通过，与对方所报一致）、`cargo clippy --all-targets -- -D warnings`、`git diff --check`，均通过。
+- 对方取舍全部同意：非 Git 只认 C locale 下"不是仓库"的诊断、本地 upstream ref 缺失时不写 ahead/behind、非 Git 目录事实为 `None`、用临时文件收 git 输出避免管道阻塞。
+- 建议改（不挡合并）：空仓库、detached HEAD、脏工作区计数、upstream ref 缺失这几种边界没有专项测试，可在 2c / 2d 集成时顺带覆盖。
