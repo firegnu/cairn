@@ -181,6 +181,7 @@ CREATE TABLE spool_ops (                                                -- 已�
 - `records` 行写入后不再修改，只有删除例外：删除时把 `body` 置 NULL，并写入 `deleted_at`。
 - 更正、撤回、恢复取代，都通过插入新行表达。
 - 同一回合的去重靠唯一键加"插入冲突则忽略"，不靠先读后写。
+- 取代、撤回、恢复之间"谁在先"按入库顺序判定（`records` 的 rowid，即提交顺序），不按 `created_at`：本机时钟可能回拨，暂存文件也可能晚收。因此 cairn 不对数据库执行 VACUUM（VACUUM 可能重排没有 INTEGER PRIMARY KEY 的表的 rowid）。
 
 ### 6.3 正文格式
 
