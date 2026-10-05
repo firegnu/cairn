@@ -109,3 +109,17 @@
 **验证**：只新增并运行两类测试，共 3 项。`priority_backlog_makes_progress_on_every_collection` 用 `Spool::publish` 写入 4,000 个规范 ULID、合法时间、同一已知来源的 `nothing_new` 文件：修改前确认第一轮 `processed=0` 的有效 RED；修改后连续三轮均处理 1–50 个，每轮重新打开 Spool，核对待收取数持续减少、确认数增加、处理 ID 按 ULID 前进。两项 `pending_query_*` 测试先确认缺少查询行为的 RED，再验证 Yes / No / Unknown，包括其他来源、窗口前/起点/起点后、不同数据库目标且 payload 损坏、已提交未删除、tmp 和链接、目录路径被替换但原句柄继续使用，以及损坏头部/payload、文件无读权限、SQL 读取错误、零预算和读取途中耗尽正预算；同时检查查询不写库、不删改文件及 busy timeout 恢复。一次夹具中生成时间早于固定窗口起点的问题已改为显式合成时间，不计作有效 RED。
 
 最终 `cargo test --all-targets` 一次通过（save 18、scope/facts 5、store 17、probe 4，共 44 项），`cargo clippy --all-targets -- -D warnings` 一次通过；格式化与 `git diff --check` 通过。所有命令均前台等待结束，Cargo 使用指定共享编译目录；测试使用临时 HOME / XDG_STATE_HOME 和显式临时可信根，无真实 agent、真实配置或真实 cairn 数据访问。本次仅修改 `ingest.rs`、`spool.rs`、`tests/save.rs` 和本任务文件；未改 DESIGN、地基模块或表结构，未合并、未推送。
+
+### 第二轮说明
+
+2026-10-05。主控已通过 main 的 `9585ea1` 明确“必须向前推进”和“来源优先尽力而为”；先按指示在 `p2c-save` 执行 `git merge main`，合并提交为 `d3460f1`，只带入 DESIGN §6.5 / §8.3 的六行差异，无冲突。主仓库交叉审查文件仍只读，未修改。
+
+**实现**：收取总预算保持 50 个文件 / 300 ms。目录枚举与优先来源发现共用调用开始后的前 100 ms，找到 50 个优先候选时可提前结束扫描。优先处理已找到的当前来源文件，再处理已找到的其他来源，最后沿尚未扫描的文件名继续收取；各组内保留 ULID 顺序，不再开启会耗尽全部预算的“只扫描优先来源”第二轮。扫描阶段只保留候选下标，文件句柄及时释放；处理时重新通过已有安全入口核验目标。若某个头部读到扫描截止点，保留其下标供剩余预算重试，不把它误当成已跳过的文件。没有优先来源时直接沿 ULID 收取。
+
+这样在优先来源不存在、或位于大量其他来源积压之后时，已发现的其他可收取文件仍能使用预留时间提交，积压持续缩小后靠后的优先文件也会被收进来。单文件 IMMEDIATE 事务、幂等和提交后删除逻辑保持不变；没有扩大总预算、修改原有断言或取消“目标不匹配时不读正文”的检查。三态 pending 查询和地基模块未改。
+
+**新增回归**：仅新增 `cross_source_backlog_always_progresses_and_eventually_collects_late_priority`。用 `Spool::publish` 发布 4,000 个来源 A 的合法 `nothing_new` 操作，指定已登记但没有文件的来源 B 连续调用三次；随后发布一条来源 B 的合法文件，其 ULID 排在所有 A 文件之后，继续调用直到 B 入库。每次重新打开 Spool，断言处理 1–50 个、确认数增加、待收取数相应减少，并核对 A 的确认保持 ULID 顺序、B 最终有确认且暂存文件已删除。循环上界为发布 B 时的剩余操作数，由“每次至少提交一笔”直接推出，没有放宽为允许零进展。
+
+RED：原两遍实现于“B 无文件”的第一轮返回 `processed=0, ingested=0, rejected=0, replayed=0`，新测试失败。GREEN：改动后同一测试覆盖两种排列并通过（约 29 s，包含发布 4,000 个需 fsync 的文件）。除此之外只运行一次 `cargo test --all-targets`（save 19、scope/facts 5、store 17、probe 4，共 45 项全部通过）及一次 `cargo clippy --all-targets -- -D warnings`（通过）；格式化和差异空白检查通过。
+
+所有命令均前台等待结束，Cargo 使用指定共享编译目录；测试仍只用合成材料、临时 HOME / XDG_STATE_HOME 和显式临时可信根。本轮实现提交只涉及 `ingest.rs`、`tests/save.rs` 和本任务文件，没有自行改设计、表结构或真实配置；未合并回 main、未推送。没有新增需主控决定的事项。

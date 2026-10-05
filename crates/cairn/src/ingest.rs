@@ -131,6 +131,8 @@ fn pending_until(
 }
 
 /// Collect at most 50 operations, for up to 300 ms checked between file steps.
+/// Listing and best-effort source discovery get the first 100 ms; transaction
+/// processing keeps the remainder, including when the preferred source is absent.
 /// SQLite lock waits share this budget. On any error, the current transaction
 /// rolls back and its file remains; earlier committed operations stay committed.
 /// `store` must be opened for `spool.database_path()` by the caller.
@@ -139,51 +141,77 @@ pub fn ingest(
     spool: &Spool,
     preferred_source: Option<&str>,
 ) -> Result<Report, Error> {
-    let deadline = Instant::now() + Duration::from_millis(300);
-    let names = spool.names(Some(deadline))?;
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(300);
+    let scan_deadline = started + Duration::from_millis(100);
+    let names = spool.names(Some(scan_deadline))?;
+    let mut candidates = Vec::new();
+    let mut next = 0;
+    let mut preferred_count = 0;
+    if let Some(source) = preferred_source {
+        while next < names.len() && Instant::now() < scan_deadline {
+            let name = &names[next];
+            if !name.strip_suffix(".json").is_some_and(spool::valid_id) {
+                next += 1;
+                continue;
+            }
+            match spool.candidate(name, scan_deadline)? {
+                Candidate::Ready(header, _) => {
+                    let preferred = header.source.as_deref() == Some(source);
+                    preferred_count += usize::from(preferred);
+                    candidates.push((!preferred, next));
+                }
+                _ if Instant::now() >= scan_deadline => break,
+                _ => {}
+            }
+            next += 1;
+            if preferred_count == 50 {
+                break;
+            }
+        }
+    }
+    // Prioritize only candidates discovered within the scan budget. Their
+    // indices retain ULID order in each group. Then continue through unscanned
+    // names in ULID order, without another priority-only pass. If a header hit
+    // the scan deadline, `next` still points to it for a retry with the remainder.
+    candidates.sort_unstable();
     let original_timeout: u32 = store
         .connection()
         .query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
     let result = (|| {
         let mut report = Report::default();
-        // Process each preferred operation as soon as its header is known.
-        // The second pass handles other sources only after the preferred pass.
-        // Both passes retain filename order and share the same total budget.
-        for pass in 0..if preferred_source.is_some() { 2 } else { 1 } {
-            for name in &names {
-                if report.processed == 50 || Instant::now() >= deadline {
-                    return Ok(report);
-                }
-                if !name.strip_suffix(".json").is_some_and(spool::valid_id) {
-                    continue;
-                }
-                let Candidate::Ready(header, file) = spool.candidate(name, deadline)? else {
-                    continue;
-                };
-                if preferred_source.is_some()
-                    && (header.source.as_deref() == preferred_source) != (pass == 0)
-                {
-                    continue;
-                }
-                let payload = Spool::payload(file, deadline).map_err(|_| "invalid spool payload");
-                if Instant::now() >= deadline {
-                    break;
-                }
-                store.connection().busy_timeout(
-                    Duration::from_millis(original_timeout.into())
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                )?;
-                let tx = store.transaction(TransactionBehavior::Immediate)?;
-                let id = name.strip_suffix(".json").unwrap();
-                let outcome = collect_one(&tx, id, &header, payload)?;
-                tx.commit()?;
-                spool.remove(name)?;
-                report.processed += 1;
-                match outcome {
-                    "ingested" => report.ingested += 1,
-                    "rejected" => report.rejected += 1,
-                    _ => report.replayed += 1,
-                }
+        for name in candidates
+            .into_iter()
+            .map(|(_, index)| &names[index])
+            .chain(names[next..].iter())
+        {
+            if report.processed == 50 || Instant::now() >= deadline {
+                return Ok(report);
+            }
+            if !name.strip_suffix(".json").is_some_and(spool::valid_id) {
+                continue;
+            }
+            let Candidate::Ready(header, file) = spool.candidate(name, deadline)? else {
+                continue;
+            };
+            let payload = Spool::payload(file, deadline).map_err(|_| "invalid spool payload");
+            if Instant::now() >= deadline {
+                break;
+            }
+            store.connection().busy_timeout(
+                Duration::from_millis(original_timeout.into())
+                    .min(deadline.saturating_duration_since(Instant::now())),
+            )?;
+            let tx = store.transaction(TransactionBehavior::Immediate)?;
+            let id = name.strip_suffix(".json").unwrap();
+            let outcome = collect_one(&tx, id, &header, payload)?;
+            tx.commit()?;
+            spool.remove(name)?;
+            report.processed += 1;
+            match outcome {
+                "ingested" => report.ingested += 1,
+                "rejected" => report.rejected += 1,
+                _ => report.replayed += 1,
             }
         }
         Ok(report)

@@ -302,6 +302,91 @@ fn priority_backlog_makes_progress_on_every_collection() {
 }
 
 #[test]
+fn cross_source_backlog_always_progresses_and_eventually_collects_late_priority() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let mut store = f.store();
+    source(&store, "codex:source-a");
+    source(&store, "codex:source-b");
+    f.run(&["save", "--source", "codex:source-a", "--nothing-new"], "")
+        .unwrap();
+    let (path, mut operation) = f.queued();
+    fs::remove_file(path).unwrap();
+    operation.payload.created_at = AT.into();
+    let spool = f.spool();
+    for n in 1..=4000 {
+        operation.header.op_id = ulid::Ulid::from(n as u128).to_string();
+        spool.publish(&operation).unwrap();
+    }
+
+    let mut total = 0;
+    // A new source with no files must still drain the old source's backlog.
+    for round in 1..=3 {
+        let report = ingest(&mut store, &f.spool(), Some("codex:source-b")).unwrap();
+        assert!(
+            (1..=50).contains(&report.ingested),
+            "absent B, round {round}: {report:?}"
+        );
+        assert_eq!(report.processed, report.ingested);
+        total += report.ingested;
+        assert_eq!(count(&store, "confirmations"), total as i64);
+        assert_eq!(spool.status().unwrap().pending_json, 4000 - total);
+    }
+
+    // B then publishes after every remaining A file. Every call must still
+    // progress, so at most one call per remaining operation can be necessary.
+    operation.header.op_id = ulid::Ulid::from(4001u128).to_string();
+    operation.header.source = Some("codex:source-b".into());
+    spool.publish(&operation).unwrap();
+    let remaining = 4001 - total;
+    let mut found_b = false;
+    for round in 1..=remaining {
+        let report = ingest(&mut store, &f.spool(), Some("codex:source-b")).unwrap();
+        assert!(
+            (1..=50).contains(&report.ingested),
+            "late B, round {round}: {report:?}"
+        );
+        assert_eq!(report.processed, report.ingested);
+        total += report.ingested;
+        assert_eq!(count(&store, "confirmations"), total as i64);
+        assert_eq!(spool.status().unwrap().pending_json, 4001 - total);
+        found_b = store
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM confirmations WHERE source_id='codex:source-b')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if found_b {
+            break;
+        }
+    }
+    assert!(
+        found_b,
+        "the late priority operation must eventually be collected"
+    );
+    assert!(!spool
+        .path()
+        .join(format!("{}.json", operation.header.op_id))
+        .exists());
+    let mut statement = store
+        .connection()
+        .prepare("SELECT op_id FROM confirmations WHERE source_id='codex:source-a' ORDER BY id")
+        .unwrap();
+    for (index, id) in statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .enumerate()
+    {
+        assert_eq!(
+            id.unwrap(),
+            ulid::Ulid::from((index + 1) as u128).to_string()
+        );
+    }
+}
+
+#[test]
 fn pending_query_filters_target_source_window_and_processed_operations() {
     use std::os::unix::fs::symlink;
     let f = Fixture::new();
