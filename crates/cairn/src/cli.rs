@@ -209,6 +209,7 @@ pub fn run_at(
                 &crate::render::Request {
                     scope: &scope,
                     source_id: "<本来源ID>",
+                    command: &crate::install::stable_command()?,
                     now: chrono::Utc::now(),
                     incremental: false,
                     budget: crate::render::CHARACTER_BUDGET,

@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -68,6 +69,125 @@ fn original() -> String {
 }
 fn value(path: &Path) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn save_command_paths_match_installed_permission_in_hooks_and_show() {
+    for data_dir in [None, Some("data"), Some("data with ' quote")] {
+        let f = Fixture::new();
+        let run = |args: &[&str], input: &str| {
+            let mut command = f.command(args);
+            match data_dir {
+                Some(dir) => command.env("XDG_DATA_HOME", f.path(dir)),
+                None => command.env_remove("XDG_DATA_HOME"),
+            };
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        run(&["install", "--agent", "claude", "--yes"], "");
+        let config = value(&f.config("claude"));
+        let path = config["permissions"]["allow"][0]
+            .as_str()
+            .unwrap()
+            .strip_prefix("Bash(")
+            .unwrap()
+            .strip_suffix(" save:*)")
+            .unwrap();
+        assert_eq!(
+            config["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            format!("{path} hook claude")
+        );
+        run(&["adopt"], "");
+        let check = |text: &str| {
+            let paths: Vec<_> = text
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .filter_map(|command| command.split_once(" save --source ").map(|(path, _)| path))
+                .collect();
+            assert_eq!(paths, vec![path, path], "{text}");
+        };
+        for agent in ["claude", "codex"] {
+            let hook = |event: &str| {
+                let input = serde_json::json!({
+                    "hook_event_name": event, "session_id": "synthetic",
+                    "cwd": f.path("project"), "source": "startup",
+                    "prompt_id": "synthetic-turn", "turn_id": "synthetic-turn",
+                    "stop_hook_active": false
+                });
+                run(&["hook", agent], &input.to_string())
+            };
+            let start: Value = serde_json::from_str(&hook("SessionStart")).unwrap();
+            check(
+                start["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .unwrap(),
+            );
+            assert!(hook("UserPromptSubmit").is_empty());
+            let stop: Value = serde_json::from_str(&hook("Stop")).unwrap();
+            assert_eq!(stop["decision"], "block");
+            check(stop["reason"].as_str().unwrap());
+        }
+        check(&run(&["show"], ""));
+        let status: Value = serde_json::from_str(&run(&["status", "--json"], "")).unwrap();
+        fs::remove_dir(status["spool"]["path"].as_str().unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn install_preview_distinguishes_missing_outdated_and_ready_symlinks() {
+    let f = Fixture::new();
+    let link = f.path("data/cairn/bin/cairn");
+    let executable = Path::new(env!("CARGO_BIN_EXE_cairn"))
+        .canonicalize()
+        .unwrap();
+    let old = f.path("old-binary");
+    for (target, expected) in [
+        (None, "将创建"),
+        (Some(&old), "将更新"),
+        (Some(&executable), "已就绪"),
+    ] {
+        if let Some(target) = target {
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, &link).unwrap();
+        }
+        let preview = f.ok(&["install", "--agent", "claude", "--dry-run"]);
+        assert_eq!(
+            preview
+                .lines()
+                .find(|line| line.starts_with("软链接 "))
+                .unwrap(),
+            format!(
+                "软链接 {} -> {}（{expected}）",
+                link.display(),
+                executable.display()
+            )
+        );
+        assert!(!f.config("claude").exists());
+        assert_eq!(fs::read_link(&link).ok().as_ref(), target);
+        let installed = f.ok(&["install", "--agent", "claude", "--yes"]);
+        assert!(installed.contains(&format!("（{expected}）")));
+        assert_eq!(fs::read_link(&link).unwrap(), executable);
+        fs::remove_file(&link).unwrap();
+        fs::remove_file(f.config("claude")).unwrap();
+    }
 }
 
 #[test]

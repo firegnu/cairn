@@ -21,8 +21,14 @@ struct Fixture {
 
 fn isolated_key(key: &OsStr) -> bool {
     key.to_string_lossy().starts_with("GIT_")
-        || ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "TMPDIR"]
-            .contains(&key.to_str().unwrap_or(""))
+        || [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
+            "TMPDIR",
+        ]
+        .contains(&key.to_str().unwrap_or(""))
 }
 
 impl Fixture {
@@ -335,6 +341,7 @@ fn supersession_committed_after_restore_is_not_cancelled_by_that_restore() {
     assert!(restored["replaced_by"].is_null());
 
     let event = SessionStarted {
+        command: "/synthetic/cairn/bin/cairn",
         disabled: false,
         agent: "codex",
         session_id: "synthetic-p2f-recheck",

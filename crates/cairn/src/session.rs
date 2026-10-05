@@ -20,6 +20,7 @@ pub enum StartKind {
 
 pub struct SessionStarted<'a> {
     pub disabled: bool,
+    pub command: &'a str,
     pub agent: &'a str,
     pub session_id: &'a str,
     pub cwd: &'a Path,
@@ -75,6 +76,7 @@ pub fn start(event: &SessionStarted<'_>, database: &Path, root: &Path) -> Result
         &crate::render::Request {
             scope: &scope,
             source_id: &source_id,
+            command: event.command,
             now: event.now,
             incremental: matches!(event.start_kind, StartKind::Resume | StartKind::Fork),
             budget: crate::render::CHARACTER_BUDGET,
