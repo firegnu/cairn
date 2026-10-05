@@ -264,6 +264,149 @@ fn correction_is_appended_with_source_and_time_in_show_and_injection() {
 }
 
 #[test]
+fn correct_rejects_non_checkpoint_targets_without_writing() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let id = f.queued("## 停点\n原记录");
+    let correction = f.run(&["correct", &id], "## 停点\n第一条更正").unwrap();
+    let retraction = f.run(&["retract", &id], "").unwrap();
+    let restore = f.run(&["restore", &id], "").unwrap();
+    let before = f.run(&["list", "--all"], "").unwrap();
+    let s = f.store();
+    let sources_before: i64 = s
+        .connection()
+        .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
+        .unwrap();
+    for (action, kind) in [
+        (correction, "correction"),
+        (retraction, "retraction"),
+        (restore, "restore"),
+    ] {
+        let target = action.split_whitespace().nth(1).unwrap();
+        assert_eq!(f.show(target)["kind"], kind);
+        let result = f.process(&["correct", target], "## 停点\n不支持的更正链", false);
+        assert!(
+            !result.status.success(),
+            "correct must reject a {kind} target: {result:?}"
+        );
+        assert_eq!(
+            String::from_utf8(result.stderr).unwrap(),
+            "correct 只允许以 checkpoint 为目标\n"
+        );
+        assert_eq!(f.run(&["list", "--all"], "").unwrap(), before);
+        let sources_after: i64 = s
+            .connection()
+            .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            sources_after, sources_before,
+            "rejection must not leave an orphan source"
+        );
+    }
+    f.run(&["correct", &id], "## 停点\n重新更正原记录").unwrap();
+    assert_eq!(f.show(&id)["correction"]["body"], "## 停点\n重新更正原记录");
+    for args in [vec!["show", &id], vec!["show"], vec!["export"]] {
+        let text = f.run(&args, "").unwrap();
+        assert!(text.contains("重新更正原记录"));
+        assert!(!text.contains("不支持的更正链"));
+    }
+}
+
+#[test]
+fn restore_orders_after_committed_actions_even_when_wall_clock_is_behind() {
+    use chrono::{Duration as Delta, SecondsFormat, Utc};
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let id = f.queued("## 停点\n恢复后可见的原记录");
+    let replacement = f.queued("## 停点\n取代记录");
+    let retraction = f.run(&["retract", &id], "").unwrap();
+    let retraction = retraction.split_whitespace().nth(1).unwrap();
+    let s = f.store();
+    // Synthetic committed actions ahead of the wall clock, without changing the
+    // system clock or waiting for it to catch up. The original history must stay intact.
+    let future = Utc::now() + Delta::hours(1);
+    let replacement_at = future.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let retraction_at =
+        (future + Delta::milliseconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    let expected_restore_at =
+        (future + Delta::milliseconds(2)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    s.connection()
+        .execute(
+            "INSERT INTO supersessions VALUES (?1,?2)",
+            [&replacement, &id],
+        )
+        .unwrap();
+    for (action, at) in [
+        (replacement.as_str(), &replacement_at),
+        (retraction, &retraction_at),
+    ] {
+        s.connection()
+            .execute("UPDATE records SET created_at=?2 WHERE id=?1", [action, at])
+            .unwrap();
+    }
+    let replacement_before = f.show(&replacement);
+    let retraction_before = f.show(retraction);
+    let hidden = f.show(&id);
+    assert_eq!(hidden["retracted"], true);
+    assert_eq!(hidden["replaced_by"], replacement);
+
+    let restored = f.run(&["restore", &id], "").unwrap();
+    let shown = f.show(&id);
+    assert_eq!(
+        shown["retracted"], false,
+        "successful restore must undo the committed retraction"
+    );
+    assert!(
+        shown["replaced_by"].is_null(),
+        "successful restore must undo supersession too"
+    );
+    let restored_id = restored.split_whitespace().nth(1).unwrap();
+    assert_eq!(f.show(restored_id)["created_at"], expected_restore_at);
+    assert_eq!(f.show(retraction), retraction_before);
+    assert_eq!(f.show(&replacement), replacement_before);
+    assert!(f
+        .run(&["list"], "")
+        .unwrap()
+        .lines()
+        .any(|line| line.starts_with(&id)));
+    assert!(f.run(&["show"], "").unwrap().contains("恢复后可见的原记录"));
+
+    // Advancing restore's timestamp must not swallow a subsequent user retraction.
+    let later_retraction = f.run(&["retract", &id], "").unwrap();
+    assert_eq!(f.show(&id)["retracted"], true);
+    let later_id = later_retraction.split_whitespace().nth(1).unwrap();
+    assert!(f.show(later_id)["created_at"].as_str().unwrap() > expected_restore_at.as_str());
+    f.run(&["restore", &id], "").unwrap();
+    assert_eq!(f.show(&id)["retracted"], false);
+
+    // A later millisecond outside the canonical four-digit-year format cannot
+    // sort correctly; reject without leaving a source or ineffective restore.
+    s.connection()
+        .execute(
+            "UPDATE records SET created_at='9999-12-31T23:59:59.999Z' WHERE id=?1",
+            [later_id],
+        )
+        .unwrap();
+    let before = f.run(&["list", "--all"], "").unwrap();
+    let sources_before: i64 = s
+        .connection()
+        .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
+        .unwrap();
+    let result = f.process(&["restore", &id], "", false);
+    assert!(!result.status.success());
+    assert_eq!(
+        String::from_utf8(result.stderr).unwrap(),
+        "无法生成晚于已提交动作的时间\n"
+    );
+    assert_eq!(f.run(&["list", "--all"], "").unwrap(), before);
+    let sources_after: i64 = s
+        .connection()
+        .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(sources_after, sources_before);
+}
+
+#[test]
 fn retracted_record_is_hidden_by_default_and_marked_in_all_and_show() {
     let f = Fixture::new();
     f.run(&["adopt"], "").unwrap();

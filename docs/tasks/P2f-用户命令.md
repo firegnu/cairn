@@ -74,3 +74,20 @@
 **拿主意的地方**：ID 全局唯一，按 ID 的查看和管理不受当前项目限制，方便查询旧项目历史；追加声明沿用目标的项目、工作线和分支，不采集另一份 Git 事实，原事实不变。list 列出未被隐藏的各 kind，--all 另显示隐藏记录及其状态；export 导出当前线全部可见 checkpoint，附各自最新可见更正，不采用注入的每来源只留最新一条或字符预算。删除只处理指定记录的正文，不级联删除其他历史记录；墓碑展示不附正文、事实或更正。
 
 **没做的事**：未修改 DESIGN、表结构和 store / scope / facts / spool / ingest / save / turn / session 的行为，未实现阶段 3 的命令或 hook；未访问真实 cairn 数据库、真实会话或真实暂存区，未改真实配置。未启动或委派其他 agent，未改 HANDOFF，未合并 main、未推送。没有需要主控决定的事项；交叉审查、合并和主控收尾留给主控。
+
+## 返工记录
+
+2026-10-05，按交叉审查两条“必须改”和主控决定返工。已只读查看主仓库 `docs/tasks/P2f-用户命令-交叉审查.md` 全文；先执行 `git merge main`，合并提交 `6228d48` 带入设计提交 `afd2212`，采用 DESIGN §8.5 的 checkpoint 更正边界。
+
+**修改**：`commands.rs` 在追加事务中拒绝以 correction / retraction / restore 为目标的 correct，返回“correct 只允许以 checkpoint 为目标”，不创建来源或记录。对原 checkpoint 再次更正仍可成功，详情、注入及导出沿用最新更正显示。
+
+restore 的排序不再只依赖当前墙钟：在 IMMEDIATE 事务中读取目标的已提交取代、撤回及恢复动作的最大 `created_at`，新时间取 `max(当前时间, 最大动作时间 + 1 ms)`。同一规则应用于后续 retraction，避免抬高时间的 restore 抵消用户之后的撤回。只追加新行，不改历史；仍使用原有 UTC RFC 3339 毫秒格式和 render 的 `(created_at, id)` 排序。原时间格式无效、时间无法递增或递增后超出规范格式时返回错误并回滚，不能留下无效恢复或孤立来源。
+
+**验证**：只新增并定点运行两个回归，各自先 RED 再 GREEN：
+
+- `correct_rejects_non_checkpoint_targets_without_writing`：先复现二级更正返回 0；修复后验证三种不支持的目标均非 0、stderr 精确一行、记录和来源不增加，并验证对原 checkpoint 重写更正仍进入详情、注入和导出。
+- `restore_orders_after_committed_actions_even_when_wall_clock_is_behind`：仅在合成库中让已提交的取代、撤回时间领先当前墙钟，先复现 restore 返回成功但 `retracted=true`；修复后核对取代和撤回均解除、恢复时间晚于最大动作时间 1 ms、旧记录不变、列表和注入重新可见；同一回归还核对紧接着的撤回与再次恢复仍生效，以及无法表示下一个毫秒时非 0、单行错误且不追加记录或来源。没有改系统时钟，也没有用 sleep 消除倒序。
+
+随后 `cargo test --all-targets` 与 `cargo clippy --all-targets -- -D warnings` 各运行一次，均通过。全量共 85 项：cmds 12、render/session 12、save 19、scope/facts 5、store 17、turn 16、probe 4。所有命令均前台等待完成，Cargo 使用指定共享 target；测试继续使用临时 HOME / XDG_STATE_HOME 和显式临时暂存可信根，没有新增其他测试或扩大验证范围。
+
+**范围**：本次返工仅修改 `commands.rs`、`tests/cmds.rs` 和本任务文件；DESIGN 变更来自合并 main。未改 render 排序、禁改模块、真实配置或数据，未写主仓库审查文件，未委派 agent、未合并回 main、未推送。没有需要主控另作决定的事项。

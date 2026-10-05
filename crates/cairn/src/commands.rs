@@ -4,6 +4,7 @@ use crate::cli::Result;
 use crate::render::{self, Record};
 use crate::save::StoredFacts;
 use crate::store::Store;
+use chrono::{DateTime, Duration, SecondsFormat};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -152,12 +153,41 @@ pub(crate) fn append(
     if record.deleted_at.is_some() {
         return Err("记录已删除".into());
     }
+    if kind == "correction" && record.kind != "checkpoint" {
+        return Err("correct 只允许以 checkpoint 为目标".into());
+    }
     if kind == "restore" && record.replaced_by.is_none() && !record.retracted {
         return Err("没有可撤销的取代或撤回".into());
     }
     let new_id = ulid::Ulid::new().to_string();
     let source = format!("local:{new_id}");
-    let at = crate::save::now();
+    let mut at = crate::save::now();
+    if matches!(kind, "restore" | "retraction") {
+        // Match render's lexical (created_at, id) order without relying on the
+        // wall clock or random ULID tie-breaking. A later retraction must also
+        // follow a restore whose time was advanced after a clock rollback.
+        let latest: Option<String> = tx.query_row(
+            "SELECT MAX(created_at) FROM records
+             WHERE (target_id=?1 AND kind IN ('retraction','restore'))
+                OR id IN (SELECT record_id FROM supersessions WHERE target_id=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if let Some(latest) = latest {
+            let error = "无法生成晚于已提交动作的时间";
+            if !crate::save::valid_timestamp(&latest) {
+                return Err(error.into());
+            }
+            let after = DateTime::parse_from_rfc3339(&latest)?
+                .checked_add_signed(Duration::milliseconds(1))
+                .ok_or(error)?
+                .to_rfc3339_opts(SecondsFormat::Millis, true);
+            if !crate::save::valid_timestamp(&after) {
+                return Err(error.into());
+            }
+            at = at.max(after);
+        }
+    }
     tx.execute(
         "INSERT INTO sources(id,agent,session_id,association,first_seen,last_seen) VALUES (?1,'local',NULL,'uncertain',?2,?2)",
         params![source, at],
