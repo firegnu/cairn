@@ -80,3 +80,12 @@
 - **既有测试调整**：将“写入收紧权限”测试改为逐项验证拒绝宽权限且不 chmod，保持目录/主库/WAL/SHM 的覆盖。未来版本和迁移回滚测试的手工夹具改为 0700/0600，以便通过文件安全门后继续验证原有版本错误、字节不变和回滚断言；宽权限未来库由新增回归独立覆盖。其他业务断言不变。
 - **规定验证**：所有命令在前台等待完成。`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo test --all-targets` 一次通过（17 项存储测试、4 项探针测试）；`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo clippy --all-targets -- -D warnings` 一次通过。此前仅运行上述新回归的定点 RED/GREEN；未扩展验证范围。所有材料均为隔离临时目录内的合成数据。
 - **范围与交付**：仅修改存储实现、store 测试、依赖声明/锁文件及本返工记录；未改 schema、业务流程、主仓库审查文件或用户真实配置。未合并 main、未推送，无需主控决定的新事项，交主控复审。
+
+## 主控审查
+
+2026-10-05，cairn/main。结论：通过，已合并。
+- 初审：只改了允许的文件；验收 3 条（迁移幂等、权限 0700/0600、删除后库和 WAL 里找不到原文）与"只读不建库、新版本库报错不改库"都有测试；重跑测试与 clippy 通过。
+- 交叉审查（`docs/tasks/P2a-存储-交叉审查.md`）提出 2 条必须改：符号链接让权限检查落空；版本预检在收紧权限前生成宽权限 sidecar。返工（89453f5）改为打开 SQLite 之前统一核验、拒绝链接、宽权限一律拒绝不 chmod，并补并发首次打开的说明与测试；复核为"可以合并"。
+- 主控同意"宽权限一律拒绝"的取舍：cairn 自建的目录和文件本来就是私有的，拒绝没有副作用，也不会改动未来版本的库。
+- 合并时解决了与 2b 在 `crates/cairn/Cargo.toml`、`Cargo.lock` 上的依赖冲突（取两边依赖的并集），main 上 `cargo test --all-targets`（作用域 5、存储 17、探针 4）和 clippy 通过。
+- 给 2f 的提醒：`delete_body` 返回 `CheckpointBusy` 时墓碑已提交、物理清除未完成，不能报告删除成功。
