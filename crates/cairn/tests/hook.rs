@@ -227,6 +227,53 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
+fn check_stop_requires_continuation_marker(agent: &str) {
+    let f = Fixture::new();
+    f.run(&["adopt"], "");
+    assert_eq!(f.hook(agent, "user_prompt_submit"), "");
+    for (index, marker) in [None, Some(Value::from("PRIVATE-INVALID-MARKER-R1"))]
+        .into_iter()
+        .enumerate()
+    {
+        let mut stop = f.payload(agent, "stop");
+        stop["prompt"] = "PRIVATE-PROMPT-R1".into();
+        stop["last_assistant_message"] = "PRIVATE-ANSWER-R1".into();
+        match marker {
+            None => {
+                stop.as_object_mut().unwrap().remove("stop_hook_active");
+            }
+            Some(value) => stop["stop_hook_active"] = value,
+        }
+        assert_eq!(
+            f.run(&["hook", agent], &stop.to_string()),
+            allow(agent, "stop")
+        );
+        let store =
+            cairn::store::Store::open(f.db(), cairn::store::BusyTimeout::UserCommand).unwrap();
+        let decisions: i64 = store
+            .connection()
+            .query_row("SELECT count(*) FROM turn_decisions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(decisions, 0);
+        let log = f.log();
+        assert_eq!(log.lines().count(), index + 1);
+        assert!(log.lines().all(
+            |line| line.ends_with(&format!("{agent} Stop json invalid hook JSON or metadata"))
+        ));
+        assert!(!log.contains("PRIVATE-"));
+    }
+}
+
+#[test]
+fn stop_requires_continuation_marker_claude() {
+    check_stop_requires_continuation_marker("claude");
+}
+
+#[test]
+fn stop_requires_continuation_marker_codex() {
+    check_stop_requires_continuation_marker("codex");
+}
+
 impl Fixture {
     fn init_git(&self) {
         use std::time::{Duration, Instant};

@@ -53,8 +53,7 @@ struct Metadata {
     source: Option<String>,
     prompt_id: Option<String>,
     turn_id: Option<String>,
-    #[serde(default)]
-    stop_hook_active: bool,
+    stop_hook_active: Option<bool>,
     reason: Option<String>,
 }
 
@@ -177,7 +176,12 @@ fn dispatch(
     };
     let report = match event {
         "UserPromptSubmit" => crate::turn::turn_started(context, key),
-        "Stop" => crate::turn::turn_ended(context, key, metadata.stop_hook_active),
+        "Stop" => {
+            let continued = metadata.stop_hook_active.ok_or_else(|| {
+                <serde_json::Error as serde::de::Error>::missing_field("stop_hook_active")
+            })?;
+            crate::turn::turn_ended(context, key, continued)
+        }
         "SessionEnd" => crate::turn::session_ended(context, metadata.reason.as_deref()),
         _ => unreachable!(),
     };
