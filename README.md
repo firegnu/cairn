@@ -89,7 +89,7 @@ rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/cairn"
 
 ## 从源码隔离走查
 
-下面的命令在全新的临时环境中安装并走通基本流程，不会写入真实的用户配置：
+下面的命令在全新的临时环境中安装并走通基本流程，不会写入真实的用户配置。注意：暂存区位于系统给当前用户的私有临时目录（`getconf DARWIN_USER_TEMP_DIR`），不受 `TMPDIR` 影响；走查结束后那里会留下一个以数据库路径哈希命名的空目录 `cairn-spool/<哈希>/`，可以按 `cairn status` 报告的路径手动删除。
 
 ```sh
 test_root="$(mktemp -d /tmp/cairn-readme.XXXXXX)"
