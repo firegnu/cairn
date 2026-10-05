@@ -246,13 +246,13 @@ cairn status [--json]
 
 按顺序执行，命中任何一步就停：
 
-1. 项目未采用，或者设置了 `CAIRN_DISABLE=1`（前提是第一阶段确认 hook 能继承 agent 的环境变量）：放行。
-2. `continued`（`stop_hook_active`）为真：说明这是 cairn 自己触发的续跑。写入 `confirmed` 或 `unconfirmed_after_continue`，然后放行。绝不再续跑第二次。
+1. 项目未采用，或者设置了 `CAIRN_DISABLE=1`：放行。第一阶段 H 已确认本机两种工具的 hook 能继承该变量；正式禁用逻辑仍由 cairn 实现。
+2. `continued`（`stop_hook_active`）为真：表示 Stop hook 触发的续跑，该字段不标识具体是哪一个 hook。写入 `confirmed` 或 `unconfirmed_after_continue`，然后放行。绝不再续跑第二次。
 3. 在"本回合的确认窗口"里查找这个来源的确认：
-   - 有 TurnStarted 时，窗口从本回合开始算起；
+   - 适配器接入 UserPromptSubmit，翻译成 TurnStarted，窗口从本回合开始算起；
    - 没有时，从上一次 TurnEnded 判定算起；
    - 再没有，就从会话开始算起。
-   - 第一阶段要确认，用哪种方式标出回合起点最可靠。
+   - 第一阶段 B 已确认普通用户提示的 UserPromptSubmit 带回合 ID，并与后续 Stop 对应；续跑没有额外的 UserPromptSubmit。缺事件或字段时仍保留上述降级窗口。
 4. 找到确认：写入 `confirmed`，放行。
 5. 没找到：先尝试插入 `(source, turn_key, continue_requested)`。
    - 插入成功，就返回续跑请求，原因见 §9.3。
@@ -264,7 +264,7 @@ cairn status [--json]
 
 **不做的假设**：不假设 hook 回调的先后顺序，也不假设同一会话的 hooks 一定串行。官方文档写明，两种工具都会并发执行匹配到的 hooks。
 
-**要在第一阶段确认的问题**：Codex 文档说，Stop 续跑会生成"像新用户提示一样的续跑提示"，它的 `turn_id` 可能会变。所以判断"这是不是续跑"要以 `stop_hook_active` 为准，不能只看 turn_key。
+**第一阶段实测边界**：Claude Code 2.1.289 的 `prompt_id`、Codex 0.160.0 的 `turn_id` 在本轮续跑前后都不变，`stop_hook_active` 从 false 变为 true。判断续跑仍以该字段为准，不能把本版本 ID 不变当作跨版本保证。有效样例未观测到重复送达，但未做宿主重送或乱序故障实验，唯一键去重不能省略。证据见[第一阶段能力实测 B](调研/第一阶段能力实测.md#4-b回合续跑中断与重复)。
 
 ### 8.4 SessionEnded
 
@@ -289,11 +289,13 @@ cairn status [--json]
 
 ### 9.1 注入内容和预算
 
-总量预算建议 6,000 个字符，可配置。参考上限：
-- Claude 的 `additionalContext` 上限是 10,000 字符，超出部分会落盘、只给预览。
-- Codex 默认只给 hook 输出约 2,500 token，安装时在 handler 上设置 `additionalContextLimit`，比如 6000。
+总量预算采用 6,000 个字符作为首版起点，可配置。第一阶段 A 的 60 行中文合成样例在两种工具的交互会话中均完整复述正文，仅省略末尾换行。该结论限定于本轮样例，不是任意文本的通用 token 上限。
 
-第一阶段要确认两边实际收到的内容是否完整。
+- Claude 的文档参考上限为 10,000 字符；本轮验证到 6,000 字符，没有测越界行为。
+- Codex 的 SessionStart handler 设置 `additionalContextLimit: 6000`。这是近似 token 阈值，不是字符数。使用默认约 2,500 token 预算时，本轮模型只能复述首尾口令，不能完整复述中段；不依赖模型另读溢出文件来补齐注入。
+- Codex 直接 exec 在持久信任后有一次未复述注入口令、后一次成功，原因未定位。交互结果与非交互边界分别记录，不宣称所有入口同样稳定。
+
+证据与方法见[第一阶段能力实测 A](调研/第一阶段能力实测.md#3-asessionstart-与注入预算)。
 
 注入内容依次是：
 
@@ -328,7 +330,7 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 | 事件 | 读取的字段 | 输出 |
 |---|---|---|
 | SessionStart | `session_id`、`cwd`、`source` | JSON 格式的 `hookSpecificOutput.additionalContext`，也可以是纯文本 stdout（两者都会注入） |
-| UserPromptSubmit（如果需要） | `session_id`、`prompt_id`、`cwd` | 不输出（不读 `prompt`） |
+| UserPromptSubmit | `session_id`、`prompt_id`、`cwd` | 不输出（不读 `prompt`）；提供确认窗口起点 |
 | Stop | `session_id`、`prompt_id`、`cwd`、`stop_hook_active` | 放行时不输出；续跑时输出 `{"decision":"block","reason":"…"}` |
 | SessionEnd | `session_id`、`cwd`、`reason` | 不输出 |
 
@@ -336,30 +338,38 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 - 用户中断时不触发 Stop。
 - 同一个 handler 写在多个 settings 文件里，只运行一次。
 - 有"连续续跑 8 次"的上限。
-- hook 写在哪里有两个候选：用户级 `~/.claude/settings.json`（合并写入并先备份），或者官方插件的 `hooks/hooks.json`。由第一阶段定。
+- 第一阶段 A 已实测 startup、clear、compact、resume 的 JSON 注入；本轮没有测试 fork 或纯文本输出。
+- 第一阶段 D 已在 `-p` 正常完成、交互 `/exit`、`corral stop` 路径观测到 SessionEnd；不据此承诺崩溃路径一定送达。
+- 安装位置建议用户级 `~/.claude/settings.json`，增量合并并先备份。依据是项目 settings 与 Corral 会话 settings 的共存实测；用户级安装和插件安装本身尚未比较，阶段 3 在隔离 HOME 下验证。
+- 写入示例优先使用 `printf ... | cairn save --source ...`，并配置仅允许 save 的 Bash 规则。第一阶段 C 用绝对路径探针验证了窄规则下的管道正文与 `--nothing-new`；同一规则的 heredoc 被拒绝。默认 `auto` 曾成功也曾失败，不能承诺免干预。窄规则的成功样例来自非交互调用，交互固定配置组合仍有验证边界。
 
 ### 10.2 Codex
 
 | 事件 | 读取的字段 | 输出 |
 |---|---|---|
 | SessionStart | `session_id`、`cwd`、`source` | JSON 格式的 `hookSpecificOutput.additionalContext`（纯文本也会作为开发者上下文注入） |
-| UserPromptSubmit（如果需要） | `session_id`、`turn_id`、`cwd` | 不输出 |
+| UserPromptSubmit | `session_id`、`turn_id`、`cwd` | 不输出（不读 `prompt`）；提供确认窗口起点 |
 | Stop | `session_id`、`turn_id`、`cwd`、`stop_hook_active` | 放行时不输出，或输出 `{}`（Stop 不接受纯文本）；续跑时输出 `{"decision":"block","reason":"…"}` |
-| SessionEnd | `session_id`、`cwd`、`reason`（目前总是 `other`） | 不输出；超时时间设为 3 秒 |
+| SessionEnd | `session_id`、`cwd`、`reason`（本轮观测为 `other`） | 不输出；超时时间设为 3 秒 |
+| Interrupt | `session_id`、`turn_id`、`cwd` | 不输出；是中断观测，不视为正常 TurnEnded，也不触发保存续跑 |
 
 - 安装位置优先用 `~/.codex/hooks.json`：文件已存在就合并写入，并先备份。
-- 非托管的 hook 要用户在 `/hooks` 里审核并信任。信任绑定在 hook 定义的哈希上，**定义一变就得重新信任**。
-- SessionEnd 触发的时机：正常关闭、归档或删除会话，或者会话闲置 30 分钟且没有客户端打开。
+- 非托管的 hook 要用户在 `/hooks` 里审核并信任。项目信任不会自动授予 handler 信任。第一阶段 E 已验证：持久信任后执行；只换固定软链接的目标二进制仍执行；改变命令文本后被跳过。**定义一变就得重新信任**。`--yolo` 不能代替 hook 信任。
+- 第一阶段 A 已测交互 startup、clear、compact、resume 的 JSON 注入；compact 后的事件在下一次请求前出现。直接 exec 的注入复述边界见 §9.1。
+- 第一阶段 B 已观测到用户中断时有 Interrupt、没有正常 Stop。
+- SessionEnd 的文档触发时机包括正常关闭、归档/删除、无客户端打开且闲置 30 分钟；本轮只确认交互 `/exit` 和 `corral stop`。直接 exec 未获 SessionEnd handler 的持久信任，不将其没有探针日志解释为不支持。
+- 第一阶段 C 已确认默认 workspace-write 拒绝写入实验仓库外状态目录。用户随后授权 `--yolo` 重测，两种模式的 save 均成功；这不是默认沙箱成功，也不是只授予 save 的窄权限。cairn install 不自行改 sandbox/approval 配置；本轮授权与 §2 D11 的文字差异见 §15。
 
 ### 10.3 安装通则
 
-- **命令路径要稳定**：命令指向固定路径 `${XDG_DATA_HOME:-$HOME/.local/share}/cairn/bin/cairn`，这是一个指向实际二进制的软链接。升级时只换软链接指向的文件，hook 定义的文本不变，Codex 也就不用重新信任。
+- **命令路径要稳定**：命令指向固定路径 `${XDG_DATA_HOME:-$HOME/.local/share}/cairn/bin/cairn`，这是一个指向实际二进制的软链接。第一阶段 E 用内容不同的 debug/release 二进制验证了只换软链接目标、保持 hook 定义文本不变时，Codex 的已有信任仍有效。
 - **安装流程**：`install` 先展示要改的内容（`--dry-run`），征得确认（交互确认或 `--yes`），改之前先备份，只合并 cairn 自己的条目，不动其他 hook。`uninstall` 只删 cairn 自己的条目。
 - **`status` 报告**：各 agent 是否已安装、命令路径是否有效、当前目录所在项目是否已采用；Codex 还要提醒用户到 `/hooks` 确认信任状态。
 - **与 Corral 共存**：这一条只是事实说明，不改 Corral。
   - Corral 启动 Claude 时，用 `--settings '{"hooks":…}'` 注入自己的 hooks。
   - Corral 启动 Codex 时，用 `-c hooks.<事件>=…` 注入，并且加了 `--dangerously-bypass-hook-trust`。所以 Corral 启动的 Codex 会话里，cairn 的 hook 不经过信任审核也会运行。
-  - 依据：Saddle 仓库 `crates/corral-core/src/hooks.rs`。cairn 只需要实测"两边的 hooks 叠加后都能运行"。
+  - 第一阶段 F 已在两种工具上同时观测到项目探针事件与 Corral status/reply 的对应回合结果，确认这条启动路线能叠加运行；没有读取 Corral 事件文件。
+  - Corral 的 hook-trust bypass 不等于持久信任。独立启动仍需要用户审核 handler；E 的信任对照使用不带 hook-trust bypass 的直接调用。
 
 ### 10.4 没有 hooks 的 agent
 
@@ -424,21 +434,23 @@ cairn：本回合没有收到接续确认。请判断本回合是否产生了需
 |---|---|---|
 | R1 | 只在本机，换机器没有记录 | 已接受（D3） |
 | R2 | 用户中断、崩溃、在 Stop 之前退出的回合，没有保存机会 | 只按观测到的事实报告（§11.1） |
-| R3 | 每个正常回合多一次工具调用（增加延迟和 token），可能还要配权限 | 第一阶段实测，试点阶段评估 |
-| R4 | 续跑会产生一条新的最后回复，可能破坏严格输出约定 | 续跑原因文字要求"原样再给出一次上一条最终回答"（§9.3）；第一阶段观察效果 |
-| R5 | Codex 默认沙箱可能写不进状态目录 | 第一阶段门槛 C；不扩大沙箱，做不到就向用户报告 |
-| R6 | 非交互会话（`claude -p`、`codex exec`）在已采用的项目里也会走这套约定 | 用 `CAIRN_DISABLE=1` 按次关闭，以第一阶段确认可行为前提 |
-| R7 | 被委派 agent 的会话也会每回合确认，增加成本 | 试点阶段观察。`corral start` 支持 `--env KEY=VALUE`，如果 H 项通过，可以给被委派的 agent 传 `CAIRN_DISABLE=1`；是否这样做由用户决定 |
+| R3 | 每个正常回合多一次工具调用，并可能被权限拒绝 | C 已测 Claude 默认权限不可靠、窄 save 规则加 printf 管道可用；成本与交互固定配置仍需试点 |
+| R4 | 续跑产生新的最后回复，模型可能改变严格输出 | G 的 JSON/DONE 样例在原样重发约定下通过；Claude print 的 result 是续跑后的回答。通用原因不额外要求 DONE，不能把样例通过当作字节级保证 |
+| R5 | Codex 默认 workspace-write 已实测拒绝写入仓库外状态目录 | 保留默认失败证据；用户已允许 yolo 对照且写入成功。§2 D11 的原文字未在本任务修改，主控同步新约束后再确定实现入口 |
+| R6 | 非交互的权限和注入表现不能直接由交互结果推定 | H 已证实环境继承，可实现 `CAIRN_DISABLE=1` 按次关闭；A 的 exec 复述有一次失败、一次成功。用户很少用非交互，默认排除与是否阻断实施仍待明确 |
+| R7 | 被委派 agent 的会话也会每回合确认，增加成本 | H 已通过 `corral start --env CAIRN_DISABLE=1` 的继承实测；实现禁用后是否默认这样启动，仍由用户决定 |
 | R8 | 模型可能写错、漏写，或者错误地声明取代 | 用户可以更正、撤回、恢复；注入时保留折叠提示 |
 
 ## 15. 待定问题
 
 | 问题 | 由谁、什么时候定 |
 |---|---|
-| 最终的写入传输方式，以及权限、沙箱需要的最小配置 | 第一阶段实测（门槛 C） |
-| 回合起点怎么标出（是否用 UserPromptSubmit）；续跑后 Codex 的 `turn_id` 会不会变 | 第一阶段（B） |
-| Claude 的 hook 写在用户 settings 还是插件里 | 第一阶段（E） |
-| 注入预算，以及 Codex 的 `additionalContextLimit` 设多少 | 第一阶段（A） |
-| resume、fork 时具体补注入什么 | 阶段 2 |
-| 正文长度上限、注入文字的最终措辞 | 阶段 2，可以试点时再调 |
-| 是否要为被委派 agent 或脚本会话提供默认排除 | 试点后，由用户决定 |
+| 最终的写入传输方式，以及权限、沙箱需要的最小配置 | C：Claude 建议 printf 管道加仅允许 save 的规则；Codex 默认沙箱失败，用户授权 yolo 后通过。主控同步 D11 与门槛文字，明确正式支持边界；不自行改用户沙箱配置 |
+| 回合起点怎么标出；续跑后 Codex 的 `turn_id` 会不会变 | B 已确认：使用 UserPromptSubmit；本轮 turn_id 不变、stop_hook_active=true，仍以续跑标记为准 |
+| Claude 的 hook 写在用户 settings 还是插件里 | E 建议用户 settings 增量合并；插件及用户级安装未实际比较，阶段 3 在隔离 HOME 下验证 |
+| 注入预算，以及 Codex 的 `additionalContextLimit` 设多少 | A 的交互样例通过：6,000 字符、Codex handler limit=6000；默认预算不够，见 §9.1 |
+| resume、fork 时具体补注入什么 | resume 事件及新注入已测，fork 未测；补哪些内容仍由阶段 2 定 |
+| 正文长度上限、注入文字的最终措辞 | 阶段 2，可以试点再调；G 支持只要求原样重发，不加入额外结束标记 |
+| 是否要为被委派 agent 或脚本会话提供默认排除 | H 已确认环境继承；用户很少用非交互，未明确默认排除策略，仍由用户决定 |
+
+第一阶段结论与证据见[能力实测报告](调研/第一阶段能力实测.md)。A 的非交互稳定性、C 的固定配置组合仍有边界，不能将原门槛标成无条件通过。用户已明确允许 C 使用 yolo 重测并调整原约束；本任务按范围保留 §2 D1–D12 与其他阶段文本，主控需同步这项已批准变更，并明确非交互覆盖是否阻断阶段 2，不在本分支自行推进核心实现。
