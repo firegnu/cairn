@@ -1,10 +1,30 @@
 //! User command boundary; explicit paths also allow isolated callers/tests.
 
 use clap::{Parser, Subcommand};
-use std::io::Read;
-use std::path::Path;
+use std::io::{BufRead, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// Print a user-command result and return its process exit code.
+pub fn report(result: Result<String>) -> i32 {
+    match result {
+        Ok(message) => {
+            print!("{message}");
+            if !message.ends_with('\n') {
+                println!();
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!(
+                "{}",
+                error.to_string().lines().collect::<Vec<_>>().join(" ")
+            );
+            1
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "cairn", version, about = "工作接续记忆")]
@@ -18,8 +38,32 @@ pub enum Command {
     Adopt,
     Unadopt,
     Show {
+        id: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+    Correct {
+        id: String,
+    },
+    Retract {
+        id: String,
+    },
+    Restore {
+        id: String,
+    },
+    Delete {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    List {
+        #[arg(long)]
+        line: bool,
+        #[arg(long)]
+        all: bool,
+    },
+    Export {
+        path: Option<PathBuf>,
     },
     Save {
         #[arg(long)]
@@ -55,6 +99,23 @@ pub fn run(cli: Cli, input: &mut impl Read) -> Result<String> {
     run_at(cli, input, &cwd, &database, &crate::spool::trusted_root()?)
 }
 
+fn collect(database: &Path, root: &Path) -> Result<crate::store::Store> {
+    let spool = crate::spool::Spool::open(root, database)?;
+    let mut store = crate::store::Store::open(database, crate::store::BusyTimeout::UserCommand)?;
+    crate::ingest::ingest(&mut store, &spool, None)?;
+    Ok(store)
+}
+
+fn existing_store(database: &Path, root: &Path) -> Result<Option<crate::store::Store>> {
+    let existing =
+        crate::store::Store::open_read_only(database, crate::store::BusyTimeout::UserCommand)?;
+    if existing.is_none() {
+        return Ok(None);
+    }
+    drop(existing);
+    Ok(Some(collect(database, root)?))
+}
+
 /// Execute with explicit paths. Production uses run(); isolated tests provide a
 /// private temporary root without overriding the system root selection policy.
 pub fn run_at(
@@ -68,25 +129,21 @@ pub fn run_at(
     let git = crate::scope::Git::default();
     let scope = git.resolve(cwd)?;
     match cli.command {
-        Command::Show { json } => {
-            let existing = crate::store::Store::open_read_only(
-                database,
-                crate::store::BusyTimeout::UserCommand,
-            )?;
-            if existing.is_none() {
+        Command::Show { id, json } => {
+            let Some(mut store) = existing_store(database, root)? else {
                 return Ok(if json {
                     "{\"status\":\"no_data\"}"
                 } else {
                     "尚无数据"
                 }
                 .into());
-            }
-            drop(existing);
-            let spool = crate::spool::Spool::open(root, database)?;
-            let mut store =
-                crate::store::Store::open(database, crate::store::BusyTimeout::UserCommand)?;
-            crate::ingest::ingest(&mut store, &spool, None)?;
+            };
             let tx = store.transaction(rusqlite::TransactionBehavior::Deferred)?;
+            if let Some(id) = id {
+                let output = crate::commands::show(&tx, &id, json)?;
+                tx.commit()?;
+                return Ok(output);
+            }
             let rendered = crate::render::render(
                 &tx,
                 &crate::render::Request {
@@ -102,6 +159,66 @@ pub fn run_at(
                 Ok(serde_json::to_string(&rendered)?)
             } else {
                 Ok(rendered.text)
+            }
+        }
+        Command::Correct { id } => {
+            let mut store = collect(database, root)?;
+            let body = read_body(input, false)?.unwrap();
+            crate::commands::append(&mut store, &id, "correction", Some(&body))
+        }
+        Command::Retract { id } => {
+            let mut store = collect(database, root)?;
+            crate::commands::append(&mut store, &id, "retraction", None)
+        }
+        Command::Restore { id } => {
+            let mut store = collect(database, root)?;
+            crate::commands::append(&mut store, &id, "restore", None)
+        }
+        Command::Delete { id, yes } => {
+            let mut store = collect(database, root)?;
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    return Err("stdin 不是终端；请使用 --yes 确认删除".into());
+                }
+                eprint!("删除记录 {id} 的正文？[y/N] ");
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::BufReader::new(input.take(128)).read_line(&mut answer)?;
+                if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    return Err("已取消删除".into());
+                }
+            }
+            crate::commands::delete(&mut store, &id)
+        }
+        Command::List { line, all } => {
+            let Some(mut store) = existing_store(database, root)? else {
+                return Ok("尚无数据".into());
+            };
+            let tx = store.transaction(rusqlite::TransactionBehavior::Deferred)?;
+            let output = crate::commands::list(&tx, &scope, line, all)?;
+            tx.commit()?;
+            Ok(output)
+        }
+        Command::Export { path } => {
+            use std::os::unix::fs::OpenOptionsExt;
+            let Some(mut store) = existing_store(database, root)? else {
+                return Ok("尚无数据".into());
+            };
+            let tx = store.transaction(rusqlite::TransactionBehavior::Deferred)?;
+            let output = crate::commands::export(&tx, &scope)?;
+            tx.commit()?;
+            if let Some(path) = path {
+                let path = cwd.join(path);
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)?;
+                file.write_all(output.as_bytes())?;
+                file.sync_all()?;
+                Ok(format!("exported {}", path.display()))
+            } else {
+                Ok(output)
             }
         }
         Command::Save {
@@ -157,10 +274,7 @@ pub fn run_at(
             Ok(message)
         }
         command => {
-            let spool = crate::spool::Spool::open(root, database)?;
-            let mut store =
-                crate::store::Store::open(database, crate::store::BusyTimeout::UserCommand)?;
-            crate::ingest::ingest(&mut store, &spool, None)?;
+            let mut store = collect(database, root)?;
             let adopted = matches!(command, Command::Adopt);
             crate::adopt::set_adopted(&mut store, &scope, adopted)?;
             Ok(format!(
