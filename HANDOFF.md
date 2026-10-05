@@ -6,13 +6,14 @@
 
 - **阶段 1（能力实测）已完成**：门槛 A、B、C、F 在 Claude Code 2.1.289 和 Codex 0.160.0 上满足本次实测范围。报告：`docs/调研/第一阶段能力实测.md`；任务与审查记录：`docs/tasks/P1-*.md`。
 - DESIGN 已按实测结论修订（§8.3、§9.1、§10、§14、§15），并新增**暂存区写入设计**（§6.5）：`cairn save` 只写用户私有临时目录里的暂存文件，hook 和用户命令收进数据库。经独立交叉审查两轮复核通过。
-- 仓库现在只有探针 `tools/cairn-probe`（虚拟 workspace 唯一成员），正式 `cairn` crate 还没开始写。
-- 没有开着的 dev / test agent；没有未清理的 worktree 或分支。
+- 阶段 2 进行中：正式 crate 在 `crates/cairn`（用户定）。2b 作用域与 Git 事实已合并（`scope.rs`、`facts.rs`）。2a 存储由 cairn/dev-store 在分支 `p2a-store` 上做，做完要交叉审查。
+- 阶段 2 的任务书照用户同意，把实施计划的"建议验证"写成验收条件。
 
 ## 下一步
 
-1. 开阶段 2（核心）。按 `docs/实施计划.md` 阶段 2 拆任务；地基先串行：2a 存储（含 `spool_ops`、`confirmations.op_id`），与 2b 作用域与事实可以并行。2c 的 save 按 DESIGN §6.5 / §8.2 两段式实现。
-2. 开工前先定正式 `cairn` crate 在 workspace 里的位置（根 package 还是 `crates/cairn`），以及探针什么时候删。
+1. 审查并合并 2a（含交叉审查）。2a 和 2b 都往 `crates/cairn/Cargo.toml` 加了依赖，合并时可能要解决冲突。
+2. 之后派 2c（adopt 与 save，按 DESIGN §6.5、§8.2 两段式）；2d、2e 依赖 2a，可以视情况并行。
+3. 探针 `tools/cairn-probe` 什么时候删，还没定。
 
 ## 悬而未决
 
