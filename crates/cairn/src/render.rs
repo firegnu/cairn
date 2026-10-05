@@ -307,7 +307,7 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
     }
     let mut summaries = Vec::new();
     for record in others {
-        summaries.push(Piece {
+        let mut summary = Piece {
             text: format!(
                 "{} · {} · {} · {}{}\n",
                 record.line,
@@ -315,7 +315,7 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
                 age(&record.at, request.now)?,
                 stopping_point(record.body.as_deref().unwrap())
                     .lines()
-                    .next()
+                    .find(|line| !line.trim().is_empty())
                     .unwrap_or(""),
                 if Path::new(&record.line).exists() {
                     ""
@@ -324,7 +324,20 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
                 }
             ),
             ids: vec![record.id.clone()],
-        });
+        };
+        if let Some(correction) = all.iter().find(|r| {
+            r.kind == "correction" && r.target.as_deref() == Some(&record.id) && r.visible()
+        }) {
+            summary.text.push_str(&format!(
+                "更正 {} · 来源 {} · {}\n{}\n",
+                correction.id,
+                correction.source,
+                correction.at,
+                correction.body.as_deref().unwrap()
+            ));
+            summary.ids.push(correction.id.clone());
+        }
+        summaries.push(summary);
     }
     let mut levels = vec![0; entries.len()];
     loop {

@@ -737,3 +737,117 @@ fn resume_adds_new_correction_without_repeating_the_original_body() {
         .record_ids
         .is_empty());
 }
+
+#[test]
+fn other_line_summary_injects_latest_visible_correction_within_budget() {
+    let f = Fixture::new();
+    f.git(&f.cwd(), &["init", "-b", "main"]);
+    f.run(&["adopt"], "").unwrap();
+    let s = f.store();
+    let other = f.cwd().canonicalize().unwrap().join("historical-line");
+    record(
+        &s,
+        "other-base",
+        "local:writer",
+        &other,
+        1,
+        ("checkpoint", None),
+        "## 停点\n旧说法：接口已验证",
+    );
+    for (id, minute, body) in [
+        ("other-old-fix", 0, "较早的更正"),
+        ("other-fix", 2, "## 停点\n更正：接口尚未验证"),
+        ("other-hidden-fix", 3, "不应出现的更正"),
+    ] {
+        record(
+            &s,
+            id,
+            "local:editor",
+            &other,
+            minute,
+            ("correction", Some("other-base")),
+            body,
+        );
+    }
+    record(
+        &s,
+        "hide-fix",
+        "local:editor",
+        &other,
+        4,
+        ("retraction", Some("other-hidden-fix")),
+        "",
+    );
+    let out = start(&f, StartKind::Startup, false).unwrap();
+    assert!(out.text.contains("更正：接口尚未验证"));
+    assert!(out.text.contains("旧说法：接口已验证"));
+    assert!(out.text.contains("更正 other-fix · 来源 local:editor · 2026-10-05T12:02:00.000Z\n## 停点\n更正：接口尚未验证"));
+    assert!(!out.text.contains("较早的更正"));
+    assert!(!out.text.contains("不应出现的更正"));
+    assert_eq!(out.record_ids, ["other-base", "other-fix"]);
+    let ids: Vec<String> = s
+        .connection()
+        .prepare(
+            "SELECT record_id FROM injections WHERE source_id='codex:reader' ORDER BY record_id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(ids, ["other-base", "other-fix"]);
+    assert!(out.text.chars().count() < 6000);
+    // The summary and its correction must fit together, or both are omitted.
+    let budget = out.text.chars().count() - 1;
+    let bounded = output(&f, &s, budget);
+    assert!(bounded.text.chars().count() <= budget);
+    assert!(!bounded.text.contains("旧说法：接口已验证"));
+    assert!(!bounded.text.contains("更正：接口尚未验证"));
+    assert!(bounded.record_ids.is_empty());
+}
+
+#[test]
+fn other_line_summary_skips_leading_blank_lines_without_changing_full_body() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let s = f.store();
+    let line = f.cwd().canonicalize().unwrap();
+    let other = line.join("historical-line");
+    let body =
+        "## 停点\n\n \t\n应出现在摘要里的停点\n第二行不进摘要\n\n## 下一步（建议，非授权）\n继续";
+    record(
+        &s,
+        "current",
+        "local:current",
+        &line,
+        1,
+        ("checkpoint", None),
+        body,
+    );
+    record(
+        &s,
+        "other",
+        "local:other",
+        &other,
+        1,
+        ("checkpoint", None),
+        body,
+    );
+    let out = output(&f, &s, 6000);
+    let summary = out
+        .text
+        .split("### 其他工作线\n")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap();
+    assert_eq!(
+        summary,
+        format!(
+            "{} · main · 59 分钟前 · 应出现在摘要里的停点 · 已不可定位，只作历史",
+            other.display()
+        )
+    );
+    assert!(out.text.contains(body));
+}

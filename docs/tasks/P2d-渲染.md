@@ -83,3 +83,15 @@ startup / clear / compact / other 完整渲染；resume / fork 只补本来源�
 用户在本轮明确确认措辞范围：**“限定自动生成文字，正文原样保留”**。因此禁用词检查针对 cairn 自动叙述，不审改历史正文，也不把历史中的模型判断变成程序事实。未修改 DESIGN 的既定行为。
 
 **没做的事**：未实现回合判定、其他用户命令、hook JSON 入口、错误日志入口或 install；没有修改 store / schema / scope / facts / spool / ingest / save、HANDOFF、真实配置，未访问真实 cairn 数据或真实会话。未启动 / 委派 agent，未合并 main、未推送。查看 / 恢复提示中的 `show <ID>`、`list --line`、`restore` 命令由 2f 接续实现。没有需要主控决定的事项；交叉审查与合并留给主控。
+
+## 返工记录
+
+2026-10-05，按交叉审查第 1 条（必须改）和第 2 条（建议改）返工。主仓库 `docs/tasks/P2d-渲染-交叉审查.md` 全文只读查看，未修改。
+
+**修改**：其他工作线摘要沿用本工作线的最新可见更正筛选条件，在原摘要后附上该更正的完整正文、来源和时间，并将更正 ID 加入同一输出片段的 `record_ids`。原摘要与更正一起参与已有字符预算：一起展示并登记 injections，或因预算不足一起省略，不留下缺少更正的旧说法。仅一行摘要的提取改为寻找停点中的首个非空内容行，跳过开头空行及仅含空白的行；完整正文和停点一节的渲染保持原样。用户已确认的“限定自动生成文字，正文原样保留”边界不变。
+
+**验证**：仅新增并定点运行两个测试，均先确认目标断言失败，再实施修复并转为 GREEN。`other_line_summary_injects_latest_visible_correction_within_budget` 使用临时 Git 仓库、其他历史工作线的“旧说法：接口已验证”和“更正：接口尚未验证”，通过公开 SessionStarted startup 入口复现原先遗漏更正；修复后核对最新可见更正的正文、来源、时间、record_ids 和数据库 injections，同时排除较早和已撤回的更正，并验证缩小预算时原摘要与更正一起省略。`other_line_summary_skips_leading_blank_lines_without_changing_full_body` 复现标题后空行导致摘要为空，修复后逐字核对首个非空行摘要，并确认相同材料在本工作线的完整正文不变。
+
+随后 `cargo test --all-targets` 和 `cargo clippy --all-targets -- -D warnings` 各运行一次，均通过；全量共 57 项（render/session 12、save 19、scope/facts 5、store 17、probe 4）。所有命令均前台等待结束，Cargo 使用指定共享 target；测试仍为合成材料、临时 HOME / XDG_STATE_HOME、临时 Git 仓库和显式临时暂存可信根。格式化和差异空白检查通过，没有扩大验证范围、放宽断言或改超时。
+
+**范围**：本次仅修改 `render.rs`、`tests/render_session.rs` 和本任务文件，提交到 `p2d-render`；未改 DESIGN、地基模块、主仓库审查文件、真实配置或数据，未合并、未推送。没有新增需主控决定的事项。
