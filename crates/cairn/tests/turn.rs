@@ -757,3 +757,42 @@ fn ingestion_failure_still_records_observations_but_never_requests_continuation(
         assert_eq!(f.spool().status().unwrap().pending_json, 0);
     }
 }
+
+#[test]
+fn spool_open_failure_preserves_confirmed_continued_decision_and_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new(true);
+    allowed(turn::turn_started(f.context(START), Some("turn-1")));
+    confirm(
+        &f,
+        "codex:synthetic",
+        "nothing_new",
+        "2026-10-05T00:01:30.000Z",
+    );
+    let spool_directory = f.root.path().join("cairn-spool");
+    std::fs::create_dir(&spool_directory).unwrap();
+    std::fs::set_permissions(&spool_directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let result = turn::turn_ended(f.context(END), Some("turn-1"), true);
+
+    assert_eq!(result.action, Action::Allow);
+    assert!(matches!(
+        result.errors.as_slice(),
+        [turn::Error::Spool(cairn::spool::Error::UnsafeDirectory)]
+    ));
+    assert_eq!(
+        decisions(&f),
+        [("turn-1".into(), "confirmed".into(), END.into())]
+    );
+    assert_eq!(activity_counts(&f), [1, 1, 1, 1, 0, 0]);
+    assert_eq!(
+        std::fs::metadata(&spool_directory)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(std::fs::read_dir(spool_directory).unwrap().count(), 0);
+}

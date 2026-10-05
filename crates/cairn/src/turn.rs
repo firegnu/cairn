@@ -155,25 +155,37 @@ pub fn turn_ended(context: Context<'_>, turn_key: Option<&str>, continued: bool)
             return Ok(Action::Allow);
         };
         let source = source_id(context);
-        let spool = Spool::open(context.spool_root, context.database)?;
-        if let Err(error) = crate::ingest::ingest(&mut store, &spool, Some(&source)) {
-            errors.push(Error::Ingest(error));
+        let spool = match Spool::open(context.spool_root, context.database) {
+            Ok(spool) => Some(spool),
+            Err(error) => {
+                errors.push(Error::Spool(error));
+                None
+            }
+        };
+        if let Some(spool) = &spool {
+            if let Err(error) = crate::ingest::ingest(&mut store, spool, Some(&source)) {
+                errors.push(Error::Ingest(error));
+            }
         }
         let observed_since = window_start(store.connection(), &source)?;
-        let pending =
-            if !continued && !has_confirmation(store.connection(), &source, &observed_since)? {
+        let pending = match &spool {
+            None => Pending::Unknown,
+            Some(spool)
+                if !continued
+                    && !has_confirmation(store.connection(), &source, &observed_since)? =>
+            {
                 crate::ingest::pending(
                     &store,
-                    &spool,
+                    spool,
                     &source,
                     &observed_since,
                     Duration::from_millis(100),
                 )
-            } else {
-                Pending::No
-            };
-        if pending == Pending::Unknown {
-            // The existing three-state API deliberately does not expose a cause.
+            }
+            Some(_) => Pending::No,
+        };
+        if pending == Pending::Unknown && spool.is_some() {
+            // Query Unknown has no cause; open failures already retain theirs.
             errors.push(Error::PendingUnknown);
         }
         let tx = store.transaction(TransactionBehavior::Immediate)?;

@@ -84,3 +84,15 @@ TurnStarted 在事务中登记 hook 来源并记录起点；TurnEnded 先检查�
 pending 查询固定使用 100 ms 预算，不改变 2c 收取的 50 文件 / 300 ms 预算。查询后用短 IMMEDIATE 事务重查采用状态、窗口和确认；窗口被并发 hook 改变时，旧暂存查询不能证明新窗口没有文件，按 Unknown 放行。2c 的 Unknown 不提供底层原因，因此返回固定 `PendingUnknown` 错误供阶段 3 日志记录，不猜测根因。收取报错不阻止后续观测，但任何错误都禁止返回续跑、也不消耗续跑请求键。本模块新增的数据库时间使用传入的收到时间，2c 收取自身的时间约定保持不变。暂存查询仍是有预算的观测，不声称与并发发布形成跨文件系统 / 数据库原子快照。
 
 **没做的事**：未做渲染、SessionStarted、hook JSON 适配及输出、errors.log、用户命令或 install；未改变 DESIGN（只合入主控修订）、HANDOFF、真实配置及其他模块行为，未开或委派 agent。未合并回 main、未推送。没有新增需主控决定的事项；交叉审查与合并留给主控。
+
+## 返工记录
+
+2026-10-05，按主控采纳的交叉审查建议第 1 条返工。主仓库的 `docs/tasks/P2e-回合判定-交叉审查.md` 仅只读查看，未修改。
+
+**修改**：`Spool::open` 失败不再提前返回；保留原始 `Error::Spool`，以缺少安全 Spool 的状态继续数据库判定。这时不收取、不查询暂存文件，pending 取 Unknown；仍按既有优先级记录 confirmed / unconfirmed_after_continue / pending_unprocessed。已知的打开错误不再叠加一个无法提供更多信息的 PendingUnknown。任何错误禁止续跑、不消耗请求键的规则保持不变；未修改 Spool 的安全检查或任何预算。
+
+**定点回归**：只新增 `spool_open_failure_preserves_confirmed_continued_decision_and_error`。临时采用项目在 00:01:00 收到 TurnStarted，00:01:30 已提交 nothing_new；临时可信根内创建权限 0755 的 cairn-spool，再于 00:02:00 调用 continued=true 的 TurnEnded。修改前获得有效 RED：实际判定为空，期望为一条 confirmed。修改后同一测试 GREEN：放行，精确保留一个 `Spool(UnsafeDirectory)` 错误，写入 confirmed，确认仍在库中；未收取、未写正文，目录权限与空目录内容未改变。时间均为合成的 2026-10-05 UTC 毫秒值。
+
+**限定验证结果**：新测试按 RED→GREEN 各运行一次；随后 `cargo test --all-targets` 仅运行一次，**未通过**。它在原有 save 测试组以 13 通过、6 失败结束（81.99 s），失败均为 `Timeout(2s)`：`concurrent_saves_publish_distinct_files_and_collect_every_operation`、`database_namespaces_and_foreign_destinations_are_left_untouched`、`exclusive_publication_preserves_existing_final_and_temp_files`、`priority_backlog_makes_progress_on_every_collection`、`invalid_id_version_or_timestamp_reject_without_body_or_confirmation`、`supersedes_requires_existing_live_injected_target_on_same_project_and_line`。代码对应既有 Git 调用的 2 秒超时；本轮未查明超时根因，也不据此声称是环境抖动。全量运行在 save 组退出，未执行后续 turn 等测试组；新回归的 GREEN 来自此前定点运行。`cargo clippy --all-targets -- -D warnings` 仅运行一次，通过。
+
+所有命令均前台等待结束，Cargo 使用指定共享编译目录。按主控“各一次”的要求未重跑全量、未扩展测试或排查矩阵；未改 save / scope 等模块、现有测试、断言或超时。测试只用临时状态目录、项目和可信根，未访问真实数据或配置。此次只修改 `turn.rs`、`tests/turn.rs` 和本任务文件；未改 DESIGN 或主仓库审查文件，未合并回 main、未推送。没有新增设计事项；全量验证的超时失败留给主控决定后续处理。
