@@ -12,6 +12,10 @@ fn main() {
             return;
         }
     };
+    if let cairn::cli::Command::Hook { agent } = cli.command {
+        cairn::hook::execute(agent);
+        return;
+    }
     std::process::exit(cairn::cli::report(cairn::cli::run(
         cli,
         &mut std::io::stdin().lock(),

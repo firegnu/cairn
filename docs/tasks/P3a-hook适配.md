@@ -56,3 +56,27 @@
 
 ## 做完
 在本文件末尾追加「## 完成记录」（在你的分支里提交）：做了什么、验证了什么、拿主意的地方、没做的事，各几句话。回复里只写这几样，加上有没有要主控决定的事。命令都在前台跑完，全部做完后，回复最后一行写 DONE。
+
+## 完成记录
+
+2026-10-05，cairn/dev-hook 完成。
+
+**做了什么**：新增 `hook.rs`，`cairn hook claude|codex` 从 stdin 选择性解码事件元数据，直接调用既有 session / turn 接口；来源、cwd、回合 ID、continued、启动类型和两种输出格式按本任务映射。CLI 在解析用户命令所需的 cwd / 状态路径之前分流 hook；二进制 hook 输出不附带用户命令的换行，失败退出 0。入口先检查禁用开关，只解析事件名以决定放行格式，禁用后不访问数据库或暂存区。错误日志只用固定类别和说明，不格式化输入或底层错误正文；文件 0600、最近 200 行，写日志失败不改变放行。11 份合成 JSON 夹具通过后删除 `tools/cairn-probe`，同步 workspace 和锁文件。未改核心模块或表结构。
+
+**验证**：保留真实 RED→GREEN：最初 hook CLI 未注册，测试因 InvalidSubcommand 失败；增加入口后 SessionStart 缺少 JSON 注入失败；子进程测试发现通用输出多了一个换行；禁用时名为 `unknown` 的未知事件与解析失败哨兵冲突，导致多输出 `{}`。各问题均在对应实现后通过。最终 `cargo test -p cairn --test hook` 的 7 项测试通过，覆盖 11 份夹具、未采用（库不存在及明确 unadopt）、禁用时损坏数据库与待收文件不动、两种 Stop 续跑/放行、JSON/核心/数据库忙/Git 超时失败放行、日志权限/保留/写入失败。隐私测试用唯一合成标记检查输出、数据库及侧文件、错误日志和暂存区；transcript_path 指向隔离目录中的 FIFO，正常完成证明未打开读取。
+
+直接相关边角检查：重复 Stop；startup / resume / clear / compact / fork / 未知 source 映射；缺少回合 ID；未知事件（含禁用时）；hook 使用 JSON cwd 而非 `run_at` 的 cwd；SessionEnd 在暂存根不可用时仍记录结束且不收取；SessionEnd 在数据库锁冲突及模拟慢 Git 下小于 1.5 秒返回。已采用路径包含临时 Git 仓库；全部材料及环境均隔离。没有扩大到真实 agent 实测。
+
+探针删除后，`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo test --all-targets` 跑一次通过（89 项）；`CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo clippy --all-targets -- -D warnings` 跑一次通过。`cargo fmt --all`、`git diff --check` 通过。所有命令均在前台等待完成。
+
+**拿主意的地方**：Codex Interrupt 直接忽略，不记数据库事件、不判定或续跑（任务允许选择）。未知 source，包括 fork，按任务映射为 other。JSON 已损坏到无法可靠识别事件时，Claude 静默，Codex 返回合法空对象 `{}`，避免潜在 Stop 得到非 JSON；有效未知事件始终静默。SessionEnd 的两次 Git discovery 各限 100 ms，保留核心既有 200 ms 数据库等待策略。一次失败日志只记录首个错误类别，写日志使用非阻塞锁，避免延长 hook 等待；状态路径本身不可用或日志不可写时尽力而为。生产沿用系统 DARWIN_USER_TEMP_DIR，测试用显式临时可信根。
+
+**没做的事**：未实现 install / uninstall / status / README，未改 DESIGN、HANDOFF 或任何核心行为；未运行真实 agent，未读真实会话、工具记忆、真实 cairn 数据或 Corral 内部文件，未改用户配置。未合并 main、未推送。无须主控决定的事项，分支提交后交主控和独立审查者复核。
+
+## 返工记录
+
+2026-10-05，按交叉审查 R1 返工。将共享 Metadata 的 `stop_hook_active` 改为 `Option<bool>`，保留缺失与 false 的区别；仅在 Stop 分支要求该字段存在，缺失（含 null）时在调用 `turn_ended` 前返回 JSON 元数据错误。类型不正确仍由 serde 拒绝。两种情况均走既有错误放行路径，日志使用固定 `json` 类别和 `invalid hook JSON or metadata` 说明，不包含输入正文；其他事件不要求该字段，核心接口和行为未改。
+
+新增 Claude / Codex 两项回归，均经隔离 `cli::run_at` 先采用项目、记录 UserPromptSubmit，再分别送缺字段和错误字符串类型的 Stop，核对输出为空串 / `{}`、`turn_decisions` 始终为 0、每次追加一行固定错误日志且不含合成隐私标记。修复前定向运行两项均 RED：实际错误返回 block；修复后两项均 GREEN。
+
+验证范围仅为上述回归及指定检查，所有 Cargo 命令使用共用 `CARGO_TARGET_DIR` 并在前台等待结束：`cargo test -p cairn --test hook stop_requires_continuation_marker`（RED 2 失败，修复后 GREEN 2 通过）；`cargo test --all-targets` 跑一次通过（91 项）；`cargo clippy --all-targets -- -D warnings` 跑一次通过。未改核心模块、设计、真实配置或数据，主仓库交叉审查文件只读；仅提交到 `p3a-hook`，不合并、不推送。无新增待主控决定事项。

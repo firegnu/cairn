@@ -35,6 +35,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Hook {
+        #[arg(value_enum)]
+        agent: crate::hook::Agent,
+    },
     Adopt,
     Unadopt,
     Show {
@@ -89,6 +93,9 @@ fn read_body(input: &mut impl Read, nothing_new: bool) -> Result<Option<String>>
 }
 
 pub fn run(cli: Cli, input: &mut impl Read) -> Result<String> {
+    if let Command::Hook { agent } = cli.command {
+        return Ok(crate::hook::run(agent, input, None));
+    }
     let cwd = std::env::current_dir()?;
     let xdg = std::env::var_os("XDG_STATE_HOME");
     let home = std::env::var_os("HOME");
@@ -125,6 +132,9 @@ pub fn run_at(
     database: &Path,
     root: &Path,
 ) -> Result<String> {
+    if let Command::Hook { agent } = cli.command {
+        return Ok(crate::hook::run(agent, input, Some((database, root))));
+    }
     use crate::save::{Header, Operation, Payload, StoredFacts};
     let git = crate::scope::Git::default();
     let scope = git.resolve(cwd)?;

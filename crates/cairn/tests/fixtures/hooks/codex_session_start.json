@@ -1,0 +1,8 @@
+{
+  "hook_event_name": "SessionStart",
+  "session_id": "synthetic-codex-session",
+  "cwd": "/synthetic/project",
+  "transcript_path": "/synthetic/never-open-transcript",
+  "model": "synthetic-model",
+  "source": "startup"
+}

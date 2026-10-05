@@ -1,0 +1,10 @@
+{
+  "hook_event_name": "Stop",
+  "session_id": "synthetic-claude-session",
+  "cwd": "/synthetic/project",
+  "transcript_path": "/synthetic/never-open-transcript",
+  "model": "synthetic-model",
+  "prompt_id": "synthetic-claude-turn",
+  "stop_hook_active": true,
+  "last_assistant_message": "PRIVATE-ANSWER-MARKER-8R2"
+}
