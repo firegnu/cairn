@@ -55,3 +55,16 @@
 
 ## 做完
 在本文件末尾追加「## 完成记录」（在你的分支里提交）：做了什么、验证了什么、拿主意的地方（尤其是表结构定稿时补的约束和索引）、没做的事，各几句话。回复里只写这几样，加上有没有要主控决定的事。命令都在前台跑完，全部做完后，回复最后一行写 DONE。
+
+## 完成记录
+
+2026-10-05，cairn/dev-store 完成。
+
+- **做了什么**：实现 `store.rs` 与 `store/schema.rs`，使用 `rusqlite`（bundled）。`database_path(xdg_state_home, home)` 显式接收调用方取得的环境值，纯计算目标路径并词法规范化，不访问文件系统；空 XDG 值回退到 HOME，缺少可用根路径或相对根路径报错。`Store::open` 创建私有目录/文件、配置 SQLite 并迁移；`Store::open_read_only` 在库不存在时返回 `None`。提供 `connection()`、可选事务行为的 `transaction()`、幂等的 `migrate()` 和 `delete_body(id, deleted_at)`，时间戳由调用方提供。锁等待两档为 Hook 200 ms、UserCommand 2 s。
+- **验证了什么**：新增 13 项存储集成测试。迁移幂等、纯路径计算、权限、未来版本无改写、缺库只读不创建、正文物理删除、只读拒绝宽权限，均先运行目标测试得到针对缺失行为的 RED，再实现并取得 GREEN；失败分别包括缺少 meta 表、路径未规范化、目录为 0755、未来库字节被 WAL 设置改变、只读路径创建了库、删除未执行、接受宽权限。正文测试先确认唯一合成标记同时存在于主库与 WAL，再验证删除后两处原始字节均不含标记，且墓碑元数据和其他正文保留。
+- **直接相关的边角验证**：写入打开收紧已有目录/主库/WAL/SHM 权限；只读连接读取尚在 WAL 的已提交数据并拒绝写入；迁移创建部分表后发生冲突会回滚表与版本；版本仅在 WAL 更新为未来版本时，两种打开方式均拒绝且主库/WAL 字节不变；外键、枚举、操作唯一键及五种回合结果去重；删除遇到活动读事务时返回检查点繁忙，释放读事务后重试清除残留并保留首次删除时间。全部材料都在 `tempdir` 内，路径函数显式传入临时 XDG_STATE_HOME/HOME 值，不修改进程全局环境，不访问真实状态目录。
+- **规定检查**：前台运行 `CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo test --all-targets` 一次通过（13 项存储测试、4 项原有探针测试）；随后前台运行 `CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target cargo clippy --all-targets -- -D warnings` 一次通过。所有目标测试命令也均等待执行完毕。
+- **表结构定稿**：保留 §6.2 全部十张表与字段含义。补文本主键 NOT NULL、adopted 的 0/1 约束，以及 association、records.kind、confirmations.kind、turn_decisions.outcome、spool_ops.outcome 的设计枚举约束；`events.kind` 按草案保持可扩展。保留原外键和唯一键，包含 `confirmations.op_id UNIQUE` 与 `spool_ops.op_id` 主键。新增五个索引：records 的项目/工作线/来源/时间/ID，以及 records.target_id、supersessions.target_id、confirmations 的来源/时间、events 的来源/时间。未增加业务触发器，调用方通过连接写 SQL 时仍须遵守记录只追加与连接设置约定。
+- **其他拿主意的地方**：写入打开会收紧过宽权限，只读打开拒绝过宽权限而不 chmod；对已存在的 WAL 库，只读连接仍允许 SQLite 创建私有 sidecar，不迁移、不创建主库或目录。写入打开先用只读连接检查版本，避免先切 WAL 或关闭写连接时改写未来版本库。迁移用 IMMEDIATE 事务并在锁内复查版本。删除提交墓碑后检查 TRUNCATE 的返回状态，检查点繁忙不能当作成功；报错时墓碑可能已提交，调用方可安全重试。不存在的记录返回 false，重复删除保留最早 deleted_at。
+- **没做的事**：未实现 save、暂存收取、渲染、回合判定、用户命令或安装；未修改 scope/facts/lib/main/tools、DESIGN 或 HANDOFF；未运行真实 agent、未改真实配置或访问真实 cairn 数据；不合并 main、不推送。
+- **需要主控决定的事**：无。后续 2c–2f 可直接使用上述路径、连接与事务接口；2f 需把检查点失败作为删除尚未完成处理。
