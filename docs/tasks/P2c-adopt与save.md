@@ -123,3 +123,11 @@
 RED：原两遍实现于“B 无文件”的第一轮返回 `processed=0, ingested=0, rejected=0, replayed=0`，新测试失败。GREEN：改动后同一测试覆盖两种排列并通过（约 29 s，包含发布 4,000 个需 fsync 的文件）。除此之外只运行一次 `cargo test --all-targets`（save 19、scope/facts 5、store 17、probe 4，共 45 项全部通过）及一次 `cargo clippy --all-targets -- -D warnings`（通过）；格式化和差异空白检查通过。
 
 所有命令均前台等待结束，Cargo 使用指定共享编译目录；测试仍只用合成材料、临时 HOME / XDG_STATE_HOME 和显式临时可信根。本轮实现提交只涉及 `ingest.rs`、`tests/save.rs` 和本任务文件，没有自行改设计、表结构或真实配置；未合并回 main、未推送。没有新增需主控决定的事项。
+
+## 主控审查
+
+2026-10-05，cairn/main。结论：通过，已合并。
+- 初审：没动地基文件和 DESIGN；验收 5 条与 §6.5 的四组补充要求都有测试；真实临时目录下没有留下 `cairn-spool`。
+- 交叉审查（`docs/tasks/P2c-adopt与save-交叉审查.md`）提出 1 条必须改：来源优先收取在积压下反复零进展。两轮返工后关闭；期间主控改了 DESIGN §6.5（9585ea1）：收取必须向前推进，来源优先改为尽力而为。建议改（给 2e 的"未处理暂存文件"有预算查询）已一并实现。
+- 第 1 条验收按 DESIGN 修订落在收取时（save 不读数据库），已告知用户。
+- 合并后 main 上 `cargo test --all-targets`（save 19、作用域 5、存储 17、探针 4）与 clippy 通过。save 测试因积压回归约需 50 秒。
