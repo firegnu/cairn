@@ -1,6 +1,6 @@
 # 交接
 
-2026-10-05，由主控 cairn/main（Claude Code）更新。
+2026-10-05，由主控 cairn/main（Claude Code）更新（开发完成，准备冒烟测试与发布）。
 
 ## 现在在哪
 
@@ -12,7 +12,8 @@ b install / uninstall / status（`install.rs`、`status.rs`）已合并并经交
 
 ## 下一步
 
-1. 问用户：要不要在 p1-lab 里用真实 agent 做一次端到端冒烟测试，再进入阶段 4 试点。
+1. 端到端冒烟测试（主控建议做，用户尚未确认）：在 p1-lab 的两个临时仓库里用会话级参数接真实 `cairn hook`，开 Claude、Codex 各一个 `cairn/test-*`（轻档），走 adopt → 注入 → save → Stop → 新会话可见、跨工具接续；不写真实配置；Codex 可能需用户在 `/hooks` 再信任一次。
+2. 阶段 4 试点：经用户同意后在真实环境 `cargo install --path crates/cairn` 并 `cairn install --agent claude|codex`，用户挑项目 `adopt`。
 
 ## 悬而未决
 
