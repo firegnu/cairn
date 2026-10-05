@@ -1,0 +1,3 @@
+[workspace]
+members = ["tools/cairn-probe"]
+resolver = "2"
