@@ -1,6 +1,6 @@
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -164,8 +164,8 @@ fn newer_schema_is_rejected_without_changing_the_database() {
         )
         .unwrap();
     drop(connection);
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
     let before = fs::read(&path).unwrap();
     assert!(matches!(
         Store::open(&path, BusyTimeout::Hook),
@@ -175,8 +175,8 @@ fn newer_schema_is_rejected_without_changing_the_database() {
         fs::read(&path).unwrap() == before,
         "future database bytes changed"
     );
-    assert_eq!(mode(&path), 0o644);
-    assert_eq!(mode(path.parent().unwrap()), 0o755);
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
     assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
 }
 
@@ -323,20 +323,24 @@ fn read_only_connection_reads_committed_wal_and_rejects_writes() {
 }
 
 #[test]
-fn writable_open_tightens_existing_permissions() {
+fn writable_open_refuses_broad_permissions_without_chmod() {
     let root = tempdir().unwrap();
     let path = isolated_path(root.path());
-    let store = Store::open(&path, BusyTimeout::Hook).unwrap();
-    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
-    for suffix in ["", "-wal", "-shm"] {
-        fs::set_permissions(sidecar(&path, suffix), fs::Permissions::from_mode(0o666)).unwrap();
+    let _writer = Store::open(&path, BusyTimeout::Hook).unwrap();
+    for (target, broad, private) in [
+        (path.parent().unwrap().to_path_buf(), 0o755, 0o700),
+        (path.clone(), 0o644, 0o600),
+        (sidecar(&path, "-wal"), 0o644, 0o600),
+        (sidecar(&path, "-shm"), 0o644, 0o600),
+    ] {
+        fs::set_permissions(&target, fs::Permissions::from_mode(broad)).unwrap();
+        assert!(matches!(
+            Store::open(&path, BusyTimeout::Hook),
+            Err(Error::InsecurePermissions(_))
+        ));
+        assert_eq!(mode(&target), broad);
+        fs::set_permissions(&target, fs::Permissions::from_mode(private)).unwrap();
     }
-    let _reopened = Store::open(&path, BusyTimeout::Hook).unwrap();
-    assert_eq!(mode(path.parent().unwrap()), 0o700);
-    for suffix in ["", "-wal", "-shm"] {
-        assert_eq!(mode(&sidecar(&path, suffix)), 0o600);
-    }
-    assert_eq!(pragma(store.connection(), "foreign_keys"), 1);
 }
 
 #[test]
@@ -376,6 +380,8 @@ fn migration_failure_rolls_back_tables_and_version() {
         .unwrap();
     let before = schema(&original);
     drop(original);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
     let error = Store::open(&path, BusyTimeout::Hook).unwrap_err();
     assert!(error.to_string().contains("sources already exists"));
     let check = Connection::open(&path).unwrap();
@@ -503,4 +509,196 @@ fn schema_enforces_foreign_keys_enums_and_operation_deduplication() {
         assert_eq!(connection.execute(sql, [outcome]).unwrap(), 1);
         assert_eq!(connection.execute(sql, [outcome]).unwrap(), 0);
     }
+}
+
+#[test]
+fn rejects_symlink_database_and_directory_without_touching_targets() {
+    let root = tempdir().unwrap();
+    let real = isolated_path(root.path());
+    let writer = Store::open(&real, BusyTimeout::Hook).unwrap();
+    seed_record(
+        writer.connection(),
+        "synthetic-symlink",
+        "synthetic link target body",
+    );
+    fs::set_permissions(real.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        fs::set_permissions(sidecar(&real, suffix), fs::Permissions::from_mode(0o666)).unwrap();
+    }
+    let alias_dir = root.path().join("alias");
+    fs::create_dir(&alias_dir).unwrap();
+    fs::set_permissions(&alias_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = alias_dir.join("cairn.db");
+    symlink(&real, &alias).unwrap();
+    let linked_dir = root.path().join("linked-directory");
+    symlink(real.parent().unwrap(), &linked_dir).unwrap();
+    let db_before = fs::read(&real).unwrap();
+    let wal_before = fs::read(sidecar(&real, "-wal")).unwrap();
+
+    for path in [&alias, &linked_dir.join("cairn.db")] {
+        let read_result = Store::open_read_only(path, BusyTimeout::Hook);
+        let write_result = Store::open(path, BusyTimeout::Hook);
+        assert!(
+            read_result.is_err(),
+            "read-only open accepted {}",
+            path.display()
+        );
+        assert!(
+            write_result.is_err(),
+            "writable open accepted {}",
+            path.display()
+        );
+        assert_eq!(mode(real.parent().unwrap()), 0o755);
+        assert_eq!(mode(&real), 0o600);
+        for suffix in ["-wal", "-shm"] {
+            assert_eq!(mode(&sidecar(&real, suffix)), 0o666);
+        }
+        assert!(fs::read(&real).unwrap() == db_before);
+        assert!(fs::read(sidecar(&real, "-wal")).unwrap() == wal_before);
+    }
+    assert!(fs::symlink_metadata(&alias)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::symlink_metadata(&linked_dir)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_dir(&alias_dir).unwrap().count(), 1);
+}
+
+#[test]
+fn preflight_rejects_sidecar_symlinks_without_touching_targets() {
+    for suffix in ["-wal", "-shm"] {
+        let root = tempdir().unwrap();
+        let path = isolated_path(root.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = root.path().join("unrelated-file");
+        fs::write(&target, b"synthetic unrelated sidecar target").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = sidecar(&path, suffix);
+        symlink(&target, &link).unwrap();
+
+        let read_result = Store::open_read_only(&path, BusyTimeout::Hook);
+        let write_result = Store::open(&path, BusyTimeout::Hook);
+        assert_eq!(mode(&target), 0o644, "{suffix} target was chmodded");
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"synthetic unrelated sidecar target"
+        );
+        assert!(
+            read_result.is_err(),
+            "read-only open accepted {suffix} link"
+        );
+        assert!(
+            write_result.is_err(),
+            "writable open accepted {suffix} link"
+        );
+        assert!(!path.exists(), "created database before rejecting {suffix}");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+
+        // A dangling link is still a link, not an absent sidecar.
+        fs::remove_file(&target).unwrap();
+        assert!(Store::open_read_only(&path, BusyTimeout::Hook).is_err());
+        assert!(Store::open(&path, BusyTimeout::Hook).is_err());
+        assert!(!target.exists());
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn preflight_rejects_closed_wide_future_wal_without_creating_sidecars() {
+    let root = tempdir().unwrap();
+    let path = isolated_path(root.path());
+    let writer = Store::open(&path, BusyTimeout::Hook).unwrap();
+    writer
+        .connection()
+        .execute(
+            "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(writer);
+    for suffix in ["-wal", "-shm"] {
+        assert!(!sidecar(&path, suffix).exists());
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+    let before = fs::read(&path).unwrap();
+
+    assert!(Store::open_read_only(&path, BusyTimeout::Hook).is_err());
+    assert!(Store::open(&path, BusyTimeout::Hook).is_err());
+    assert!(
+        fs::read(&path).unwrap() == before,
+        "future database bytes changed"
+    );
+    assert_eq!(mode(&path), 0o644);
+    assert_eq!(mode(path.parent().unwrap()), 0o755);
+    for suffix in ["-wal", "-shm"] {
+        assert!(
+            !sidecar(&path, suffix).exists(),
+            "version preflight created {suffix}"
+        );
+    }
+    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+}
+
+#[test]
+fn concurrent_first_open_leaves_a_complete_database_after_success_or_busy() {
+    let root = tempdir().unwrap();
+    let path = isolated_path(root.path());
+    let start = std::sync::Barrier::new(3);
+    let results = std::thread::scope(|scope| {
+        let open = || {
+            start.wait();
+            Store::open(&path, BusyTimeout::UserCommand)
+        };
+        let first = scope.spawn(open);
+        let second = scope.spawn(open);
+        start.wait();
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert!(
+        results.iter().any(Result::is_ok),
+        "both initializers failed: {results:?}"
+    );
+    for result in &results {
+        if let Err(error) = result {
+            assert!(
+                matches!(error, Error::Sqlite(error)
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)),
+                "unexpected initialization error: {error}"
+            );
+        }
+    }
+    drop(results);
+    let store = Store::open(&path, BusyTimeout::UserCommand).unwrap();
+    let integrity: String = store
+        .connection()
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    let version: String = store
+        .connection()
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "1");
+    let tables: i64 = store
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'table'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 10);
 }

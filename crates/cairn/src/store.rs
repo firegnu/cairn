@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -25,8 +25,10 @@ pub enum Error {
     InvalidSchemaVersion,
     #[error("XDG_STATE_HOME or HOME must supply a nonempty absolute state directory")]
     InvalidStateDirectory,
-    #[error("permissions are too broad for read-only access: {0}")]
+    #[error("permissions are too broad for database access: {0}")]
     InsecurePermissions(PathBuf),
+    #[error("database path must be an owned directory/regular file, never a symlink: {0}")]
+    UnsafePath(PathBuf),
     #[error("body is tombstoned but WAL truncation is busy; retry deletion to finish erasing it")]
     CheckpointBusy,
 }
@@ -83,45 +85,30 @@ pub struct Store {
 }
 
 impl Store {
-    /// Create/open and migrate the database, tightening its directory to 0700 and
-    /// its files to 0600. Future schema versions are rejected before write setup.
+    /// Create/open and migrate the database with a 0700 directory and 0600 files.
+    /// Existing paths must be owned by this user, have private permissions, and
+    /// be real directories/regular files, not symlinks. Unsafe paths are rejected
+    /// before SQLite access, without chmod; future schema versions are not modified.
+    /// Concurrent first initialization may return SQLITE_BUSY immediately, even
+    /// with a busy timeout. Callers must treat that error as retryable.
     pub fn open(path: impl AsRef<Path>, timeout: BusyTimeout) -> Result<Self> {
-        let path = path.as_ref();
-        // Reject future versions through a read-only connection before chmod,
-        // WAL setup, or a writable connection's checkpoint-on-close can alter them.
-        if path.try_exists()? {
-            let probe = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let path =
+            checked_database_path(path.as_ref(), true)?.ok_or(Error::InvalidStateDirectory)?;
+        // The filesystem is already verified, including private permissions on
+        // the main file from which SQLite derives new WAL/SHM permissions.
+        // Use a read-only probe so rejecting a future schema cannot checkpoint it.
+        {
+            let probe = Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )?;
             probe.busy_timeout(timeout.duration())?;
             schema_version(&probe)?;
         }
-        let parent = path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .ok_or(Error::InvalidStateDirectory)?;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)?
-            .set_permissions(fs::Permissions::from_mode(0o600))?;
-        // SQLite derives newly created WAL/SHM permissions from the database file.
-        // Tighten any sidecars left by earlier runs before SQLite uses them.
-        for suffix in ["-wal", "-shm"] {
-            let mut name = path.as_os_str().to_os_string();
-            name.push(suffix);
-            match fs::set_permissions(Path::new(&name), fs::Permissions::from_mode(0o600)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         connection.busy_timeout(timeout.duration())?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", true)?;
@@ -132,28 +119,17 @@ impl Store {
     }
 
     /// Open an existing v1 WAL database without migration or chmod. Missing paths
-    /// return None; overly broad permissions are an error. SQLite may create WAL
+    /// return None; the same path safety checks as open apply before SQLite access,
+    /// including to sidecars even when the database is absent. SQLite may create WAL
     /// sidecars for an existing database, but never the database or its directory.
     pub fn open_read_only(path: impl AsRef<Path>, timeout: BusyTimeout) -> Result<Option<Self>> {
-        let path = path.as_ref();
-        if !path.try_exists()? {
+        let Some(path) = checked_database_path(path.as_ref(), false)? else {
             return Ok(None);
-        }
-        let parent = path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .ok_or(Error::InvalidStateDirectory)?;
-        check_permissions(parent, 0o700)?;
-        check_permissions(path, 0o600)?;
-        for suffix in ["-wal", "-shm"] {
-            let mut name = path.as_os_str().to_os_string();
-            name.push(suffix);
-            let sidecar = Path::new(&name);
-            if sidecar.try_exists()? {
-                check_permissions(sidecar, 0o600)?;
-            }
-        }
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        };
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         connection.busy_timeout(timeout.duration())?;
         if schema_version(&connection)? != SCHEMA_VERSION {
             return Err(Error::InvalidSchemaVersion);
@@ -216,11 +192,81 @@ impl Store {
     }
 }
 
-fn check_permissions(path: &Path, allowed: u32) -> Result<()> {
-    if fs::metadata(path)?.permissions().mode() & 0o7777 & !allowed != 0 {
+// Check controlled entries without following symlinks. In particular, dangling
+// symlinks must not be mistaken for absent files by Path::try_exists().
+fn checked_metadata(path: &Path, directory: bool) -> Result<Option<fs::Metadata>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let correct_type = if directory {
+        metadata.is_dir()
+    } else {
+        metadata.is_file()
+    };
+    // SAFETY: geteuid has no arguments or memory preconditions.
+    if !correct_type || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(Error::UnsafePath(path.to_path_buf()));
+    }
+    let allowed = if directory { 0o700 } else { 0o600 };
+    if metadata.permissions().mode() & 0o7777 & !allowed != 0 {
         return Err(Error::InsecurePermissions(path.to_path_buf()));
     }
-    Ok(())
+    Ok(Some(metadata))
+}
+
+fn checked_database_path(path: &Path, create: bool) -> Result<Option<PathBuf>> {
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or(Error::InvalidStateDirectory)?;
+    let directory = match checked_metadata(parent, true)? {
+        Some(metadata) => metadata,
+        None if !create => return Ok(None),
+        None => {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+            checked_metadata(parent, true)?.ok_or(Error::UnsafePath(parent.to_path_buf()))?
+        }
+    };
+    // Resolve ancestor aliases (e.g. macOS /var -> /private/var), but never the
+    // database or sidecars. The controlled directory itself must not be a link.
+    let resolved_parent = fs::canonicalize(parent)?;
+    let resolved =
+        checked_metadata(&resolved_parent, true)?.ok_or(Error::UnsafePath(parent.to_path_buf()))?;
+    if (directory.dev(), directory.ino()) != (resolved.dev(), resolved.ino()) {
+        return Err(Error::UnsafePath(parent.to_path_buf()));
+    }
+    let path = resolved_parent.join(path.file_name().ok_or(Error::InvalidStateDirectory)?);
+    let exists = checked_metadata(&path, false)?.is_some();
+    for suffix in ["-wal", "-shm"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        checked_metadata(Path::new(&name), false)?;
+    }
+    if !exists {
+        if !create {
+            return Ok(None);
+        }
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        // A concurrent initializer may have created the file first. Recheck all
+        // controlled entries before the first SQLite access in either case.
+        return checked_database_path(&path, false);
+    }
+    Ok(Some(path))
 }
 
 fn schema_version(connection: &Connection) -> Result<u64> {
