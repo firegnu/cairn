@@ -12,13 +12,10 @@ fn main() {
             return;
         }
     };
-    match cairn::cli::run(cli, &mut std::io::stdin().lock()) {
-        Ok(message) => println!("{}", one_line(&message)),
-        Err(error) => {
-            eprintln!("{}", one_line(&error.to_string()));
-            std::process::exit(1);
-        }
-    }
+    std::process::exit(cairn::cli::report(cairn::cli::run(
+        cli,
+        &mut std::io::stdin().lock(),
+    )));
 }
 
 fn one_line(message: &str) -> String {

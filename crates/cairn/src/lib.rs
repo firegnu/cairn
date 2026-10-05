@@ -2,6 +2,7 @@
 
 pub mod adopt;
 pub mod cli;
+mod commands;
 pub mod facts;
 pub mod ingest;
 pub mod render;
