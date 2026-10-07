@@ -17,6 +17,8 @@
 
 1. 阶段 4 试点（等用户晚上回来测试）：`cairn` 已 `cargo install` 进真实 `~/.cargo/bin`（用户同意）；两种 agent 的 `cairn install --dry-run` 已给用户看过（用户级 `~/.claude/settings.json`、`~/.codex/hooks.json`，各 4 个 hook，Claude 另加一条只放行稳定路径 save 的规则）。下一步：用户确认后 `cairn install --agent claude|codex --yes`，用户在 Codex `/hooks` 信任，用户挑项目 `cairn adopt`。
 
+2. 试点之后（用户 10-07 同意写成文档，未定开工）：与 paddock 结合，见 `docs/调研/与paddock结合.md`。cairn 侧先把 JSON 输出定成公开约定、补 `list --json`；paddock 侧由 paddock 主控做。
+
 ## 悬而未决
 
 - 端到端冒烟测试已完成（`docs/调研/端到端冒烟测试.md`）：Codex 通过，Claude 条件通过。S1-1：项目规则限制命令时 Claude 可能不确认、续跑后也不确认（cairn 如实记录，不无限续跑）；是否调整注入措辞，试点后由用户决定。
