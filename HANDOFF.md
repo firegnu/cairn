@@ -1,6 +1,13 @@
 # 交接
 
-2026-10-05，由主控 cairn/main（Claude Code）更新（开发完成，准备冒烟测试与发布）。
+2026-10-07，由主控 cairn/main（Claude Code）更新（试点仍等用户点头；新增与 paddock 结合的调研）。
+
+## 本次会话（10-07）
+
+- 摘要：用户回来后先问 cairn 是做什么的、装上后怎么用；**用户明确说"先别安装"**，试点仍停在安装前。随后按用户要求只读调查了 cairn 怎么和 paddock（`../paddock`，GPUI 桌面前端）结合，写成 `docs/调研/与paddock结合.md`。
+- 完成：新增上述调研文档；`HANDOFF.md` 下一步第 2 条。没改代码，没碰 paddock / ranch 仓库，没执行 `cairn install`。
+- 关键结论（详见调研文档）：paddock 只经公开命令＋JSON 调外部工具，所以由 paddock 调 `cairn` 命令，两边不互相引用代码；按工作目录（worktree）对应工作线；`corral start --env CAIRN_DISABLE=1` 可按 agent 关 cairn。缺口：`list` 无 `--json`，`show --json` 不分节，JSON 未写成公开约定。
+- 给用户讲解安装时的口径：程序已 `cargo install`；`cairn install` 只是往 agent 配置里写 hook 和一条权限规则，并建稳定软链接；装后每个项目还要 `cairn adopt`。
 
 ## 现在在哪
 
@@ -15,7 +22,7 @@
 
 ## 下一步
 
-1. 阶段 4 试点（等用户晚上回来测试）：`cairn` 已 `cargo install` 进真实 `~/.cargo/bin`（用户同意）；两种 agent 的 `cairn install --dry-run` 已给用户看过（用户级 `~/.claude/settings.json`、`~/.codex/hooks.json`，各 4 个 hook，Claude 另加一条只放行稳定路径 save 的规则）。下一步：用户确认后 `cairn install --agent claude|codex --yes`，用户在 Codex `/hooks` 信任，用户挑项目 `cairn adopt`。
+1. 阶段 4 试点（10-07 用户说"先别安装"，等用户点头）：`cairn` 已 `cargo install` 进真实 `~/.cargo/bin`（用户同意）；两种 agent 的 `cairn install --dry-run` 已给用户看过（用户级 `~/.claude/settings.json`、`~/.codex/hooks.json`，各 4 个 hook，Claude 另加一条只放行稳定路径 save 的规则）。下一步：用户确认后 `cairn install --agent claude|codex --yes`，用户在 Codex `/hooks` 信任，用户挑项目 `cairn adopt`。
 
 2. 试点之后（用户 10-07 同意写成文档，未定开工）：与 paddock 结合，见 `docs/调研/与paddock结合.md`。cairn 侧先把 JSON 输出定成公开约定、补 `list --json`；paddock 侧由 paddock 主控做。
 
