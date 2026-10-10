@@ -53,6 +53,15 @@ pub fn start(event: &SessionStarted<'_>, database: &Path, root: &Path) -> Result
     let mut store = Store::open(database, BusyTimeout::Hook)?;
     crate::ingest::ingest(&mut store, &spool, Some(&source_id))?;
     let tx = store.transaction(TransactionBehavior::Immediate)?;
+    // Unadopt may have committed since the probe; nothing is written or injected then.
+    let adopted: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE key=?1 AND adopted=1)",
+        [key],
+        |r| r.get(0),
+    )?;
+    if !adopted {
+        return Ok(None);
+    }
     let at = event.now.to_rfc3339_opts(SecondsFormat::Millis, true);
     tx.execute(
         "INSERT INTO sources(id,agent,session_id,association,first_seen,last_seen)
@@ -71,6 +80,7 @@ pub fn start(event: &SessionStarted<'_>, database: &Path, root: &Path) -> Result
         "INSERT INTO events(source_id,kind,at,detail) VALUES (?1,'session_started',?2,?3)",
         params![source_id, at, kind],
     )?;
+    crate::turn::hook_seen(&tx, key, event.agent, "SessionStart", &at)?;
     let rendered = crate::render::render(
         &tx,
         &crate::render::Request {

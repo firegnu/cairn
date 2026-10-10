@@ -56,7 +56,7 @@ Only adopted projects receive and inject records; everything else is left alone.
 - `cairn restore <ID>`: undo a supersession or retraction of a record.
 - `cairn delete <ID>`: erase a record's body and keep only a tombstone; add `--yes` to skip the prompt.
 - `cairn export`: export the current work line's records to stdout, or to a new file path.
-- `cairn status`: show agent installation, project adoption and spool status.
+- `cairn status`: show agent installation, project adoption, spool status and when each agent's hooks last fired in this project.
 
 Agents save records by passing the body to `cairn save` on stdin, for example:
 

@@ -141,6 +141,7 @@ pub fn turn_started(context: Context<'_>, turn_key: Option<&str>) -> Report {
             "INSERT INTO events(source_id,kind,at,detail) VALUES (?1,'turn_started',?2,?3)",
             params![source, context.at, turn_key],
         )?;
+        seen(&tx, context, "UserPromptSubmit")?;
         tx.commit()?;
         Ok(Action::Allow)
     })())
@@ -194,6 +195,7 @@ pub fn turn_ended(context: Context<'_>, turn_key: Option<&str>, continued: bool)
         if !adopted(&tx, context)? {
             return Ok(Action::Allow);
         }
+        seen(&tx, context, "Stop")?;
         let since = window_start(&tx, &source)?;
         let confirmed = has_confirmation(&tx, &source, &since)?;
         let turn_key = turn_key.filter(|key| !key.is_empty());
@@ -213,6 +215,8 @@ pub fn turn_ended(context: Context<'_>, turn_key: Option<&str>, continued: bool)
         // Collection errors must not consume a continuation slot or request a
         // continuation. Other observable outcomes may still be recorded (§8.3).
         if outcome == Outcome::ContinueRequested && !errors.is_empty() {
+            // Nothing but the hook_seen time has been written.
+            tx.commit()?;
             return Ok(Action::Allow);
         }
         let reason = if outcome == Outcome::ContinueRequested {
@@ -259,6 +263,7 @@ pub fn session_ended(context: Context<'_>, reason: Option<&str>) -> Report {
             "INSERT INTO events(source_id,kind,at,detail) VALUES (?1,'session_ended',?2,?3)",
             params![source_id(context), context.at, reason],
         )?;
+        seen(&tx, context, "SessionEnd")?;
         tx.commit()?;
         Ok(Action::Allow)
     })())
@@ -323,6 +328,39 @@ fn continuation_with_rejections(
         message.push_str("。请改正后重新 save。");
     }
     Ok(message)
+}
+
+/// Remember that this hook event was handled for an adopted project: one row for each
+/// project, agent and event, holding the latest time only (DESIGN §6.2). `event` is the
+/// agent's own hook event name. A project that has no row yet is left alone.
+pub(crate) fn hook_seen(
+    connection: &Connection,
+    project_key: &str,
+    agent: &str,
+    event: &str,
+    at: &str,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO hook_seen(project_id,agent,event,at)
+         SELECT id,?2,?3,?4 FROM projects WHERE key=?1
+         ON CONFLICT(project_id,agent,event) DO UPDATE SET at=MAX(at,excluded.at)",
+        params![project_key, agent, event, at],
+    )?;
+    Ok(())
+}
+
+fn seen(connection: &Connection, context: Context<'_>, event: &str) -> Result<(), Error> {
+    let key = context
+        .project_key
+        .to_str()
+        .ok_or(Error::InvalidProjectKey)?;
+    Ok(hook_seen(
+        connection,
+        key,
+        context.agent.name(),
+        event,
+        context.at,
+    )?)
 }
 
 fn source_id(context: Context<'_>) -> String {

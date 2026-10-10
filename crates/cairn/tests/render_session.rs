@@ -862,3 +862,72 @@ fn other_line_summary_skips_leading_blank_lines_without_changing_full_body() {
     );
     assert!(out.text.contains(body));
 }
+
+/// DESIGN §7.1: what other programs may rely on from `show --json`.
+#[test]
+fn show_json_keeps_its_two_shapes_and_still_shows_records_once_unadopted() {
+    let f = Fixture::new();
+    let shown = |f: &Fixture| -> serde_json::Value {
+        serde_json::from_str(&f.run(&["show", "--json"], "").unwrap()).unwrap()
+    };
+    assert_eq!(shown(&f), serde_json::json!({"status": "no_data"}));
+
+    f.run(&["adopt"], "").unwrap();
+    let empty = shown(&f);
+    assert!(empty["text"].as_str().unwrap().starts_with("[cairn] "));
+    assert_eq!(empty["record_ids"], serde_json::json!([]));
+
+    let line = f.cwd().canonicalize().unwrap();
+    record(
+        &f.store(),
+        "synthetic-record",
+        "codex:writer",
+        &line,
+        1,
+        ("checkpoint", None),
+        "## 停点\nSYNTHETIC_OLD_BODY",
+    );
+    f.run(&["unadopt"], "").unwrap();
+    let status: serde_json::Value =
+        serde_json::from_str(&f.run(&["status", "--json"], "").unwrap()).unwrap();
+    assert_eq!(status["project"]["status"], "not_adopted");
+    // Unadopting stops hooks; it does not hide what was recorded from the user.
+    let after = shown(&f);
+    assert!(after["text"]
+        .as_str()
+        .unwrap()
+        .contains("SYNTHETIC_OLD_BODY"));
+    assert_eq!(after["record_ids"], serde_json::json!(["synthetic-record"]));
+}
+
+#[test]
+fn session_start_that_loses_a_race_with_unadopt_writes_and_injects_nothing() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    // The start below recreates this once it is past its adoption probe.
+    let spool = f.root.path().join("cairn-spool");
+    fs::remove_dir_all(&spool).unwrap();
+
+    let unadopting = rusqlite::Connection::open(f.db()).unwrap();
+    unadopting
+        .execute_batch("BEGIN IMMEDIATE; UPDATE projects SET adopted = 0;")
+        .unwrap();
+    let started = std::thread::scope(|scope| {
+        let start = scope.spawn(|| start(&f, StartKind::Startup, false));
+        let waiting = Instant::now();
+        while fs::read_dir(&spool).map_or(true, |mut entries| entries.next().is_none()) {
+            assert!(
+                waiting.elapsed() < Duration::from_secs(5),
+                "start never got past its probe"
+            );
+            std::thread::yield_now();
+        }
+        unadopting.execute_batch("COMMIT").unwrap();
+        start.join().unwrap()
+    });
+    assert!(started.is_none());
+    let s = f.store();
+    for table in ["hook_seen", "sources", "events", "injections"] {
+        assert_eq!(count(&s, table), 0, "{table}");
+    }
+}
