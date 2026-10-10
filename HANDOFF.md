@@ -28,13 +28,14 @@
   - `cairn list --json` 和 `cairn show <ID> --json` 写进公开约定（DESIGN §7.1）。状态用 `deleted_at`、`replaced_by`、`retracted` 三个字段表示，中文文字数组 `status` 不进约定。
   - 版本号 0.2.0 → **0.3.0**。Codex（`cairn/dev-list-json-1`，常规档）实现，主控审查通过，没做交叉审查（影响面：改行为）。main 上 **119 项测试**通过，clippy 干净。
   - 已合并（`2cc973a`）、推送，worktree 和分支已清，dev agent 已关。
-  - **还没做**：0.3.0 没装到真实环境（`~/.cargo/bin/cairn` 还是 0.2.0）；没通知 paddock/main。两步都等用户点头（见“下一步”第 1 条）。
+  - **0.3.0 已装到真实环境**（用户：“都做，装好后直接corral send给paddock”）：20:32 `cargo install --path crates/cairn --locked` 换掉了 `~/.cargo/bin/cairn`，稳定软链接照旧指向它。表结构没变，没备份数据库。装好后在 paddock 仓库里跑 `cairn list --json --limit 0`，返回 `{"total":27,"records":[]}`（只要了条数，没读记录内容）。
+  - **已通知 paddock/main**（`corral send`，已送达；回执里 `merged_with_draft` 为 true，它的输入框里当时可能有没发出的草稿）：字段名、格式、版本号 0.3.0。paddock 那边接着做 P5-79。
 
 ## 现在在哪
 
 - **试点已经在跑**（不是“等用户点头”）：
   - Claude Code 的 hook 10-08 装了（`~/.claude/settings.json`：4 个 hook 加一条放行稳定路径 `cairn save` 的规则）。
-  - Codex 的 hook 10-10 装了（用户：“给codex也装上吧”，paddock/main 执行；`~/.codex/hooks.json` 4 处，改前备份 `~/.codex/hooks.json.bak-20261010T071731…`）。直接启动的 Codex 要用户到 `/hooks` 里信任，**还没在真实 Codex 会话里确认触发**；新的 `last_seen` 正好用来看这件事。
+  - Codex 的 hook 10-10 装了（用户：“给codex也装上吧”，paddock/main 执行；`~/.codex/hooks.json` 4 处，改前备份 `~/.codex/hooks.json.bak-20261010T071731…`）。直接启动的 Codex 要用户到 `/hooks` 里信任，10-10 20:33 看 paddock 里的 `last_seen`，Codex 四种事件都已有时间（17:43–17:48），触发过了。
   - 已采用的项目：owlet、paddock（paddock 10-10 起，和它的全量 HANDOFF 并存试一两周，10-24 前后用户回看）。owlet 的 HANDOFF 已减到只留稳定背景，进度靠 cairn 的记录，所以**真实数据库不能随手清**。
   - ranch（corral／派活技能）派出去的 agent 一律带 `CAIRN_DISABLE=1`（ranch R2），cairn 只留给用户直接对话的主控。
 - **paddock 已经在用 cairn**：右侧栏第四个标签 Cairn（paddock P5-55，已合并安装）调用 `cairn status --json`、`cairn show --json`、`cairn adopt` 三条，面板开着时每 5 秒读一次（`show` 会顺手收取暂存区）。paddock 接下来的 P5-78 要在面板上显示 `last_seen`（paddock 主控做，等用户看任务文件）。
@@ -50,9 +51,8 @@
 
 ## 下一步
 
-1. **装 0.3.0、通知 paddock/main**（等用户点头）：`cargo install --path crates/cairn --locked` 换掉 `~/.cargo/bin/cairn`（hook 配置不用改，表结构没变，不用备份数据库）；装好后把字段名、格式（DESIGN §7.1 的 `list --json`、`show <ID> --json` 两条）和版本号 0.3.0 告诉 paddock/main，它等这个才开 P5-79。本仓库规矩不许主控对用户的现有 agent 执行 `corral send`，要用户放行或由用户转达。
-2. **看试点**（用户定：直接用 paddock 试）：在已采用的项目里跑 `cairn status`，看每家“本项目最近触发”那一行（或 `--json` 的 `last_seen`）。Claude 的 UserPromptSubmit、Stop 在 paddock 里已确认触发；还没看到的：SessionStart、SessionEnd（等 paddock/main 重开或结束）、重开后注入的内容准不准、Codex（全是空，可能是没开过会话，也可能是 `/hooks` 里还没信任）。10-24 前后用户回看 paddock 的试点（HANDOFF 瘦不瘦由用户定）。
-3. **paddock 还想要、没做的**（见 `docs/调研/与paddock结合.md`，开不开工由用户定）：`show --json`（不带 ID）分节。做的时候按 §7.1 的“只加不改”来，新字段写进 §7.1。
+1. **看试点**（用户定：直接用 paddock 试）：在已采用的项目里跑 `cairn status`，看每家“本项目最近触发”那一行（或 `--json` 的 `last_seen`）。10-10 20:33 在 paddock 里看到：Claude 的 SessionStart、UserPromptSubmit、Stop 都有时间，SessionEnd 还没有；Codex 四种事件都有时间（17:43–17:48），说明 Codex 的 hook 在 paddock 里触发过。还没看的：重开后注入的内容准不准。10-24 前后用户回看 paddock 的试点（HANDOFF 瘦不瘦由用户定）。
+2. **paddock 还想要、没做的**（见 `docs/调研/与paddock结合.md`，开不开工由用户定）：`show --json`（不带 ID）分节。做的时候按 §7.1 的“只加不改”来，新字段写进 §7.1。
 
 ## 悬而未决
 
