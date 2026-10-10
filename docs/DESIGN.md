@@ -274,7 +274,7 @@ cairn hook <claude|codex>                          # 唯一的 hook 入口，按
 cairn save [--source ID] [--nothing-new] [--supersedes ID]...   # agent 唯一可用的写入口；正文走 stdin
 cairn show [--json]                                # 输出和注入相同的内容，给没有 hooks 的工具或人看
 cairn adopt | unadopt                              # 作用于当前目录所在的项目
-cairn list [--line] [--all] | show <ID>
+cairn list [--line] [--all] [--json [--limit N]] | show <ID> [--json]
 cairn correct <ID>          # 正文走 stdin，追加一条更正
 cairn retract <ID>          # 追加一条失效声明
 cairn restore <ID>          # 撤销对 <ID> 的取代或撤回，追加记录
@@ -290,7 +290,7 @@ cairn status [--json]
 
 ### 7.1 公开约定：别的程序可以依赖的输出（F2，2026-10-10）
 
-paddock（GPUI 桌面前端）的 Cairn 面板调用下面三条命令。这里列出的字段和行为是公开约定：**只加不改**——可以加新字段、新取值，已列出的字段名、类型、含义和退出码不改、不删；非改不可时，先在这里写明、和调用方商定，再动代码。调用方要忽略不认识的字段。没列在这里的输出（各命令给人看的文字、`status --json` 里其余字段、`show <ID> --json`）不是约定，可能变。
+paddock（GPUI 桌面前端）的 Cairn 面板调用下面这些命令。这里列出的字段和行为是公开约定：**只加不改**——可以加新字段、新取值，已列出的字段名、类型、含义和退出码不改、不删；非改不可时，先在这里写明、和调用方商定，再动代码。调用方要忽略不认识的字段。没列在这里的输出（各命令给人看的文字、`status --json` 里其余字段）不是约定，可能变；`show <ID> --json` 只有下面列出的字段是约定，其余现有字段保留但不进约定。
 
 **`cairn status [--json]`**：只读，不收取暂存区，不创建也不升级数据库。在调用时的当前目录所在的项目里回答。退出码 0；出错（比如当前目录解析失败）退出码 1、stderr 一行原因。`--json` 的 stdout 是一个 JSON 对象，其中：
 
@@ -307,6 +307,52 @@ paddock（GPUI 桌面前端）的 Cairn 面板调用下面三条命令。这里�
 - 否则：`text`（字符串，和 SessionStart 完整注入相同的全文，Markdown；这个项目在数据库里没有任何记录时只有抬头，从没采用过的项目就是这样；有过记录但都已删除、撤回时抬头后面还会有别的文字，调用方不要靠“只有抬头”判断有没有记录，看 `record_ids` 是否为空；取消采用只停掉 hook，之前的记录照样显示）和 `record_ids`（字符串数组，这段文字里包含的记录 ID，按出现顺序）。
 
 **`cairn adopt`**：采用当前目录所在的项目，立即生效；已采用时再运行也成功。成功退出码 0，stdout 一行 `adopted <项目键>`；失败退出码 1，stderr 一行原因。`unadopt` 对称（`unadopted <项目键>`）。
+
+**`cairn list --json [--limit N]`**（F3，0.3.0）：`--json` 可以和 `--line`、`--all` 一起用；`--limit N` 是非负整数，只能和 `--json` 一起用。只读，和 `status` 一样以只读方式打开数据库，不收取暂存区、不创建也不升级数据库；版本 1 的库照样能读。所以刚 `save`、还没收取的记录不在结果里。不带 `--json` 的 `list` 行为和文字输出不变，照旧先收取暂存区。
+
+过滤和文字版相同：默认给当前目录所在项目里没被删除、没被撤回、没被取代的记录，各种 `kind` 都在内；`--all` 包括这些被隐藏的记录，`--line` 只给当前工作线的记录。取消采用不隐藏已有记录。
+
+成功退出码 0，stdout 始终是一个 JSON 对象：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `total` | 非负整数 | 符合条件的记录条数：过滤之后、按 `--limit` 截断之前 |
+| `records` | 数组 | 新的在前（`created_at` 降序，相同时 `id` 降序）；带 `--limit N` 时最多 N 条，不带时全给 |
+
+还没有数据库、项目从没采用过、没有符合条件的记录，都是 `{"total":0,"records":[]}`，退出码 0。出错（比如数据库版本比程序新）退出码 1，stderr 一行原因。
+
+`records` 每条的字段：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `id` | 字符串 | 记录编号 |
+| `created_at` | 字符串 | 保存时间（运行 `save` 的时间，不是收取时间），RFC 3339 UTC 毫秒，如 `2026-10-10T08:50:43.687Z` |
+| `agent` | 字符串 | `claude`、`codex`，或 `local`（不属于哪一家的 hook 会话：`save` 没声明来源或声明的来源没出现过，以及用户命令写的更正、撤回、恢复）。以后可能有新值 |
+| `session_id` | 字符串或 `null` | 那家 agent 的会话编号；`agent` 是 `local` 时为 `null` |
+| `source_id` | 字符串 | 来源：`<agent>:<session_id>`，或 `local:<编号>` |
+| `line_path` | 字符串 | 工作线（worktree 根目录的绝对路径） |
+| `branch` | 字符串或 `null` | 保存时所在的分支；没有时为 `null` |
+| `kind` | 字符串 | `checkpoint`、`correction`、`retraction`、`restore`。以后可能有新值 |
+| `target_id` | 字符串或 `null` | 更正、撤回、恢复所指的记录编号；`checkpoint` 为 `null` |
+| `deleted_at` | 字符串或 `null` | 正文被删除的时间；没删除为 `null` |
+| `replaced_by` | 字符串或 `null` | 取代它的记录编号；没被取代为 `null` |
+| `retracted` | 布尔 | 是否被撤回 |
+| `summary` | 字符串 | 一行摘要，和文字版 `cairn list` 每行末尾那段一样（正文“## 停点”一节的第一个非空行）；没有时是空字符串 |
+
+状态由 `deleted_at`、`replaced_by`、`retracted` 表示：三个分别是 `null`、`null`、`false` 就是可见的记录，默认列表只给这种。
+
+**`cairn show <ID> --json`**（F3，0.3.0 写成约定，现有行为不改）：和不带 ID 的 `show --json` 一样先收取暂存区，会写数据库，旧版本的库也在这时升级。`<ID>` 不限于当前目录所在的项目。
+
+- 还没有数据库：退出码 0，stdout `{"status":"no_data"}`。
+- 记录不存在：退出码 1，stderr 一行 `记录不存在`。
+- 否则退出码 0，stdout 是一个 JSON 对象，包含上面 `records` 每条里除 `summary` 外的全部字段（同名同义），加上：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `body` | 字符串或 `null` | 正文原文（Markdown）；正文已删除，或这条记录本来没有正文（撤回、恢复）时为 `null` |
+| `correction` | 对象或 `null` | 这条记录最新的一条更正，没有或正文已删除时为 `null`。对象里是上面同样的字段（含 `body`，没有自己的 `correction`） |
+
+现有输出里的 `project_id`、`project_key`、`association`、`facts`、中文文字数组 `status` 保留，不进约定。
 
 ## 8. 流程
 

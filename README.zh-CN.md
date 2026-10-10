@@ -49,7 +49,7 @@ cairn unadopt
 ## 日常命令
 
 - `cairn show`：显示当前工作线会注入给 agent 的接续内容。
-- `cairn list`：列出当前工作线可见的记录。
+- `cairn list [--json]`：列出当前项目可见的记录（`--line` 只列当前工作线）。
 - `cairn show <ID>`：显示指定记录的完整内容。
 - `cairn correct <ID>`：为指定记录追加一条更正，正文从标准输入传入。
 - `cairn retract <ID>`：追加声明，使指定记录默认不再显示。

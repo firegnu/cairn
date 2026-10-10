@@ -49,7 +49,7 @@ Only adopted projects receive and inject records; everything else is left alone.
 ## Everyday commands
 
 - `cairn show`: show what would be injected into the agent for the current work line.
-- `cairn list`: list the visible records of the current work line.
+- `cairn list [--json]`: list the visible records of the current project (`--line` for the current work line).
 - `cairn show <ID>`: show one record in full.
 - `cairn correct <ID>`: append a correction to a record; the body is read from stdin.
 - `cairn retract <ID>`: append a retraction so the record is hidden by default.
