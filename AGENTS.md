@@ -37,7 +37,7 @@ cairn 是给终端里 coding agent 用的工作接续记忆工具：新会话开
 - agent 名字以 `cairn/dev-` 开头；任务文件放 `docs/tasks/`；每个任务一个分支，worktree 放 `../cairn-worktrees/<分支>`，交叉审查用 detached worktree `../cairn-worktrees/review-<分支>`。
 - 创建派发的 agent 时，在 `corral start` 参数里注明职责：实现者加 `--label role=implementer`，独立审查者加 `--label role=reviewer`，实测用的 agent 加 `--label role=test`。标签只用于显示，不改变职责分工或权限。
 - 审查：主控审查每个任务。
-- 合并：审查通过后，本地合并进 main。现在没有远程仓库；以后用户配置了 `origin`，就在合并后推送到 origin。主控不自行创建远程仓库。
+- 合并：审查通过后，本地合并进 main，再推送到 origin（`github.com/firegnu/cairn`，公开仓库）。主控不自行创建远程仓库。
 - 收尾记号：一件活合并完、worktree 和分支都清理干净之后，在 main 上补一条空提交（`git commit --allow-empty`），首行写「收尾: 」加一句话说明这件活是什么。只记真正落地的活；说好不合并、停在审查的不记。
 - 收尾之后更新 `HANDOFF.md`：现在在哪、下一步做什么、有什么悬而未决。设计和理由写进 `docs/DESIGN.md`，不写进交接文件。
 - 开出来的 agent：清理某个 worktree 时，把住在里面的那个 agent 一并关掉（它的工作目录没了，接不了新活）；其余的，用户说关才关。

@@ -37,7 +37,6 @@
 
 1. **看试点**：两家的 hook 是不是真的在触发——在已采用的项目里跑 `cairn status`，看每家“本项目最近触发”那一行（或 `--json` 的 `last_seen`）。Codex 全是空，多半是 `/hooks` 里还没信任。10-24 前后用户回看 paddock 的试点（HANDOFF 瘦不瘦由用户定）。
 2. **paddock 还想要、没做的**（见 `docs/调研/与paddock结合.md`，开不开工由用户定）：`cairn list --json`（paddock 要做历史记录列表、点开单条记录）；`show --json` 分节。做的时候按 §7.1 的“只加不改”来，新字段写进 §7.1。
-3. AGENTS.md「开发方式」里“现在没有远程仓库”一句过时了（origin 是 `github.com/firegnu/cairn`，每次合并后推送）；规矩文件 paddock/main 没动，留给 cairn 主控和用户改。
 
 ## 悬而未决
 
