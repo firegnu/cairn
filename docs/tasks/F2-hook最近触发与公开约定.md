@@ -18,7 +18,7 @@
 
 ## 怎么算做完
 - 用户没给验收原话；主控照上面四条自查。
-- 测试：升级（版本 1 的库只读能读、读写打开后升到 2、旧数据都在、再开一次不再变）；两个进程同时升级；四种事件各记各的、别家和别的事件不受影响、后一次覆盖前一次；`CAIRN_DISABLE=1` 和未采用时不记；版本 1 的库上 `status` 全报 `null` 且不升级。
+- 测试：升级（版本 1 的库只读能读、读写打开后升到 2、旧数据都在、再开一次不再变）；两个连接同时升级；四种事件各记各的、别家和别的事件不受影响、后一次覆盖前一次；`CAIRN_DISABLE=1` 和未采用时不记；版本 1 的库上 `status` 全报 `null` 且不升级。
 - `cargo test --all-targets` 和 `cargo clippy --all-targets -- -D warnings` 通过。
 - Codex 只读交叉审查到“可以合并”。
 
@@ -26,3 +26,19 @@
 - 不读用户真实的会话记录和真实的 cairn 数据库内容；测试只用合成材料和隔离目录。安装新版前只按文件整份备份数据库，不打开看。
 - 不改 `~/.claude/settings.json`、`~/.codex/hooks.json`（hook 命令走稳定软链接，换程序不用改配置）。
 - 不动 `list --json`、`show --json` 分节这些 paddock 以后才要的东西。
+
+## 完成记录
+
+2026-10-10，paddock/main。
+
+- **做了什么**：`store/schema.rs` 加 `V2`（`hook_seen`）；`store.rs` 版本升到 2，`migrate` 在一个立即事务里补上还没有的版本并改 `meta.schema_version`，`open_read_only` 接受 1 到当前版本；`turn.rs` 加 `hook_seen`，UserPromptSubmit、Stop、SessionEnd 各自在写事务里记，`session.rs` 记 SessionStart；`status.rs` 报 `agents.<名字>.last_seen`（版本 1 的库上先看表在不在），文字输出每家加一行“本项目最近触发”；DESIGN §6.2 版本 2、§7.1 公开约定、§8.7；README 一行；版本号 0.2.0。
+- **验证**：先写测试并看到它们因为缺功能而失败（版本仍是 1、没有 `hook_seen`、没有 `last_seen`），再实现。`cargo test --all-targets` 113 项通过，`cargo clippy --all-targets -- -D warnings`、`cargo fmt --check`、`git diff --check` 干净。新增测试：版本 1 的库只读能读且不被升级、读写打开升到 2、旧数据在、再开不变；两个连接同时升级；升级最后一步失败后仍是完好的版本 1、去掉故障后能升级；四种事件各记各的、后一次覆盖前一次、`status` 不写库；`CAIRN_DISABLE=1` 和取消采用后不记、已有的行照报；版本 1 的库上 `status` 全报 `null`；`show --json` 的两种形状和取消采用后仍显示旧记录；SessionStart 和取消采用抢先后时不写不注入。
+- **交叉审查**（`docs/tasks/F2-hook最近触发与公开约定-交叉审查.md`）：第一轮两条必须改、一条建议改，都采纳：R1 §7.1 把“项目没采用时 `show --json` 只有抬头”写错了（取消采用后旧记录照样显示），改了文字并加了约定回归测试；R2 SessionStart 只在只读探测时查采用状态，探测后被取消采用仍会记时间并注入，改成拿到写事务后再查一次（这个空隙 F2 之前就有，之前的后果是多注入一次、多记一条事件）；S1 补了升级中途失败的回滚测试。
+- **拿主意的地方**：
+  - 单开 `hook_seen` 一张表，不给 `events` 补项目列：不用改旧表、不用回填，行数有上限。
+  - 不清用户的数据库（用户说旧数据不重要，但两个试点项目的接续记录只在里面），只加表。
+  - Stop 在确认项目已采用之后、判定之前就记，所以“收取出错、本该续跑但不续跑”的那次提前返回从回滚改成了提交（这之前事务里只有这一条写入）。
+  - 取消采用后已有的时间留着、照报；没采用的项目、`CAIRN_DISABLE=1` 的会话、处理出错的 hook 都不记（§8.7 写明了这三个限制）。
+  - 约定里只写 paddock 真用到的字段；`status --json` 其余字段、给人看的文字不算约定。
+  - 版本号升到 0.2.0。
+- **没做的**：`list --json`、`show --json` 分节（paddock 以后才要）；磁盘满、进程被杀这类故障没实测（靠 SQLite 事务保证，只测了语句失败回滚）；没在真实 Claude Code／Codex 会话里验证四种 hook 都记上了，装好后在 paddock 仓库里用 `cairn status` 看。

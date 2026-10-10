@@ -864,3 +864,59 @@ fn concurrent_upgrade_of_a_version_1_database_adds_hook_seen_once_and_keeps_its_
         .unwrap();
     assert_eq!(counts, (1, 1, 1, "ok".into()));
 }
+
+#[test]
+fn failed_upgrade_leaves_a_version_1_database_as_it_was_and_a_later_open_upgrades_it() {
+    let root = tempdir().unwrap();
+    let path = isolated_path(root.path());
+    version_1_database(&path);
+    let original = Connection::open(&path).unwrap();
+    // The upgrade creates hook_seen and then fails on the last step, the version.
+    original
+        .execute_batch(
+            "INSERT INTO sources VALUES ('claude:synthetic', 'claude', 'synthetic', 'hook',
+                '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+            INSERT INTO records (id, project_id, line_path, branch, source_id, kind, body, created_at)
+            VALUES ('synthetic-record', 1, '/synthetic/line', 'main', 'claude:synthetic',
+                'checkpoint', 'synthetic old body', '2026-01-01T00:00:00.000Z');
+            CREATE TRIGGER synthetic_failure BEFORE UPDATE ON meta
+            BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;",
+        )
+        .unwrap();
+    let before = schema(&original);
+    let body = |connection: &Connection| -> (String, String, i64) {
+        connection
+            .query_row(
+                "SELECT body, source_id, project_id FROM records WHERE id = 'synthetic-record'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    let kept = body(&original);
+
+    let error = Store::open(&path, BusyTimeout::Hook).unwrap_err();
+    assert!(error.to_string().contains("synthetic failure"), "{error}");
+    assert_eq!(stored_version(&path), "1");
+    assert_eq!(schema(&original), before);
+    assert_eq!(body(&original), kept);
+    assert!(Store::open_read_only(&path, BusyTimeout::Hook)
+        .unwrap()
+        .is_some());
+
+    original
+        .execute_batch("DROP TRIGGER synthetic_failure")
+        .unwrap();
+    let store = Store::open(&path, BusyTimeout::Hook).unwrap();
+    assert_eq!(stored_version(&path), "2");
+    assert_eq!(body(store.connection()), kept);
+    let tables: i64 = store
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name = 'hook_seen'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 1);
+}
