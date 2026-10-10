@@ -1,10 +1,50 @@
 # 交接
 
-2026-10-10，由 paddock/main（paddock 的主控，Claude Code）更新：用户让它直接在本仓库做了 F2，并要求把交接改到最新，好让 cairn 主控下次接手时看到真实情况。上一版（10-07，cairn/main）写的“试点仍等用户点头、先别安装”已经过时。同日 cairn/main 接手后补了“接手后”一节，并改了“下一步”第 1 条和“悬而未决”的错误日志一条。
+2026-10-10，由 cairn/main（主控，Claude Code）更新。同日更早 paddock/main 按用户的话直接在本仓库做了 F2 并改过本文件，那部分留在“同日更早”一节。
 
-## 本次会话（10-10，paddock/main 在本仓库做的）
+## 本次会话（10-10，cairn/main）
 
-- 起因：paddock 的 Cairn 面板（paddock P5-55）只知道 hook 装没装，分不出“装了但没触发”；它调用的三条命令的输出也没写成约定。用户先让 paddock/main 把这两项需求用 `corral send` 交给 cairn/main；cairn/main 分析后给了 A（按项目，要升表结构）、B（按 agent 全局）两条路并用提问对话框等用户选。用户取消了那次提问，改口：“我取消了，我觉得你直接再cairn中干吧，之后更新他的handoff文件，以便下次能够正确识别最新的情况。另外我觉得问题不要最小化操作。就是一次解决。之前cairn中的数据我认为不重要。”所以这件活没有经 cairn/main 派发，AGENTS.md 的“主控不自己写功能代码”这一次照用户的话没有执行。**cairn/main 那个会话里关于这两项需求的上下文停在提问那一步，以本文件和 `docs/tasks/F2-*.md` 为准。**
+**摘要**：接手时交接还停在 10-07（“先别安装”），实际试点已经在跑；重读交接和 F2 改的设计后对齐了现状。随后按 paddock/main 转来、用户同意的需求做了 F3（`list --json` 和单条记录的公开约定，0.3.0），装到真实环境并通知了 paddock/main。
+
+**完成的**
+
+- **F3**（paddock P5-79 要的 cairn 这一半；任务书、完成记录、主控审查：`docs/tasks/F3-list-json与单条记录约定.md`）：
+  - `cairn list --json [--limit N]`：只读（不收取暂存区、不建库、不升级库），输出 `{"total":…,"records":[…]}`，新的在前；`total` 是截断前的条数。
+  - `cairn list --json` 和 `cairn show <ID> --json` 写进公开约定（DESIGN §7.1）。
+  - 版本号 0.2.0 → **0.3.0**。Codex（`cairn/dev-list-json-1`，常规档）实现，主控审查通过。main 上 **119 项测试**通过，clippy 干净。
+  - 已合并（`2cc973a`）、推送，worktree 和分支已清，dev agent 已关，收尾提交 `d3c093d`。
+  - **0.3.0 已装到真实环境**（用户：“都做，装好后直接corral send给paddock”）：20:32 `cargo install --path crates/cairn --locked` 换掉了 `~/.cargo/bin/cairn`，稳定软链接照旧指向它。表结构没变，没备份数据库。
+  - **已通知 paddock/main**（`corral send`，已送达）：字段名、格式、版本号。回执里 `merged_with_draft` 为 true，它的输入框里当时可能有没发出的草稿，已告诉用户。
+- AGENTS.md“合并”一条改成合并后推送到 origin（`64776d7`，用户同意）。
+- 两份 README 里 `cairn list` 的范围从“当前工作线”改准为“当前项目”（F3 顺带，原文不准）。
+- 只读看了两次试点（没碰 paddock/main），结果见“下一步”第 1 条。
+
+**没做完、要跟进的**（其余见“下一步”“悬而未决”）
+
+- 新会话开局注入的内容准不准，还没看。
+- `list --json` 在真实环境里只跑过 `--limit 0`（只看条数，返回 27 条）；带内容的输出只在隔离测试里验过，paddock 的 P5-79 是第一个真实使用方。
+- `errors.log` 当天 9 条的来源没查（用户：“暂时不用了，paddock在跑，他也接了你，直接使用它测试吧”）。
+- F2 的实现代码和任务、审查记录主控没读，动存储、hook 相关代码前要读。
+
+**拿的主意**（理由在任务书和 DESIGN §7.1，以后改这些输出先看 §7.1）
+
+- `list --json` 只读；没有数据库、没采用过、没有记录都给 `{"total":0,"records":[]}`，只有一种形状（和 `show --json` 的 `{"status":"no_data"}` 不一样）。
+- 状态用 `deleted_at`、`replaced_by`、`retracted` 三个字段表示；现有的中文文字数组 `status` 不进约定。
+- `show <ID> --json` 没改成只读（paddock 只要求写明）：它照旧先收取暂存区，会写数据库。
+- 列表里更正、撤回、恢复也各算一条（和文字版 `list` 一致），调用方靠 `kind` 区分。
+- 没做交叉审查：只读命令加输出，不动表结构和写入路径，影响面定为“改行为”。
+- 别的主控转来的需求怎么接：第一次（F2 那两项）主控用提问对话框向用户核实，用户取消并改让 paddock/main 自己做；F3 这次依据 paddock 任务文件里的用户原话直接开工，只把装新版和 `corral send` 两步留给用户点头。对用户现有 agent 执行 `corral send` 仍然照规矩不做，这次是用户明确放行，只限这件事。
+
+**涉及的文件**
+
+- `docs/tasks/F3-list-json与单条记录约定.md`；`docs/DESIGN.md` §7、§7.1。
+- `crates/cairn/src/cli.rs`、`crates/cairn/src/commands.rs`、`crates/cairn/tests/cmds.rs`、`crates/cairn/Cargo.toml`。
+- `README.md`、`README.zh-CN.md`、`AGENTS.md`（`CLAUDE.md` 是指向它的软链接）。
+- 需求原文（paddock 仓库，只读）：`../paddock/docs/任务/P5-79-Cairn标签改成记录列表.md` 的「cairn 给的东西」一节。
+
+## 同日更早（10-10，paddock/main 在本仓库做的 F2）
+
+- 起因：paddock 的 Cairn 面板（paddock P5-55）只知道 hook 装没装，分不出“装了但没触发”；它调用的三条命令的输出也没写成约定。用户先让 paddock/main 把这两项需求用 `corral send` 交给 cairn/main；cairn/main 分析后给了 A（按项目，要升表结构）、B（按 agent 全局）两条路并用提问对话框等用户选。用户取消了那次提问，改口：“我取消了，我觉得你直接再cairn中干吧，之后更新他的handoff文件，以便下次能够正确识别最新的情况。另外我觉得问题不要最小化操作。就是一次解决。之前cairn中的数据我认为不重要。”所以这件活没有经 cairn/main 派发，AGENTS.md 的“主控不自己写功能代码”这一次照用户的话没有执行。
 - 做了 **F2**（任务书和完成记录：`docs/tasks/F2-hook最近触发与公开约定.md`；交叉审查三轮到“可以合并”：`docs/tasks/F2-hook最近触发与公开约定-交叉审查.md`）：
   - 表结构升到**版本 2**：加 `hook_seen`（项目，agent，事件 → 最近一次被处理的时间）。这是 cairn 第一次改表结构。版本 1 的库在读写打开时升级，只加表；只读打开不升级、照样能读（DESIGN §6.2 末尾）。
   - 四种 hook 事件处理时各记各的；`cairn status --json` 每家多一个 `last_seen`（四个事件名 → 时间或 `null`），文字输出每家多一行“本项目最近触发”。记法和三个限制（没采用不记、`CAIRN_DISABLE=1` 不记、处理出错不记）在 DESIGN §8.7。
@@ -13,23 +53,7 @@
   - 版本号 0.1.0 → **0.2.0**。
 - 合并进 main（`8615769`）、推到 origin、worktree 和分支清掉、审查 agent 关掉、收尾提交（`ddfd433`）。main 上 **113 项测试**通过，clippy 干净。
 - **0.2.0 已装到真实环境**：`cargo install --path crates/cairn --locked` 换掉了 `~/.cargo/bin/cairn`（稳定软链接 `~/.local/share/cairn/bin/cairn` 指向它，hook 配置不用改）。装之前把真实数据库整份复制到 `~/.local/state/cairn-backup-20261010-before-v2/`（没打开看内容）。装好后在 paddock 仓库里跑了一次 `cairn show --json`，真实数据库随之升到版本 2；只读核对：`schema_version` 为 2、`PRAGMA integrity_check` ok、和备份逐表比过行数，记录 19、项目 2、事件 66、注入 17 都没变。备份留着，删不删由用户定。
-- 没验证的：真实 Claude Code／Codex 会话里四种 hook 是不是都记上了时间（装好时 `last_seen` 还全是 `null`，要等之后的 hook 触发）；磁盘满、进程被杀时的升级（靠 SQLite 事务，只测了语句失败回滚）。
-
-## 接手后（10-10，cairn/main）
-
-- 重读了本文件和 DESIGN §6.2 版本 2、§7.1、§8.7；F2 的实现代码和任务、审查记录没读，动相关代码前要读。
-- AGENTS.md“合并”一条改成合并后推送到 origin（`64776d7`，用户同意）。没改代码。
-- 只读看了一次试点（17:32 前后，没碰 paddock/main）：
-  - paddock 仓库里 `cairn status`：Claude 的 UserPromptSubmit（17:29）、Stop（17:28）已有时间，是 `last_seen` 第一次在真实会话里记上。SessionStart、SessionEnd 还没有（paddock/main 那个会话是装 0.2.0 之前开的）。Codex 没有记录。暂存区无积压。
-  - cairn 仓库没采用：两家都没有记录，cairn/main 开局也没收到注入，符合设计。
-  - `errors.log` 当天 9 条，全是 claude，都已放行（见“悬而未决”）。用户：“暂时不用了，paddock在跑，他也接了你，直接使用它测试吧”，所以没查，试点直接靠 paddock 用着看。
-- 做了 **F3**（paddock P5-79 要的 cairn 这一半，paddock/main 转来，依据见任务书；任务书、完成记录、主控审查：`docs/tasks/F3-list-json与单条记录约定.md`）：
-  - `cairn list --json [--limit N]`：只读（不收取暂存区、不建库、不升级库），输出 `{"total":…,"records":[…]}`，新的在前；没有数据库或没有记录时是 `{"total":0,"records":[]}`。
-  - `cairn list --json` 和 `cairn show <ID> --json` 写进公开约定（DESIGN §7.1）。状态用 `deleted_at`、`replaced_by`、`retracted` 三个字段表示，中文文字数组 `status` 不进约定。
-  - 版本号 0.2.0 → **0.3.0**。Codex（`cairn/dev-list-json-1`，常规档）实现，主控审查通过，没做交叉审查（影响面：改行为）。main 上 **119 项测试**通过，clippy 干净。
-  - 已合并（`2cc973a`）、推送，worktree 和分支已清，dev agent 已关。
-  - **0.3.0 已装到真实环境**（用户：“都做，装好后直接corral send给paddock”）：20:32 `cargo install --path crates/cairn --locked` 换掉了 `~/.cargo/bin/cairn`，稳定软链接照旧指向它。表结构没变，没备份数据库。装好后在 paddock 仓库里跑 `cairn list --json --limit 0`，返回 `{"total":27,"records":[]}`（只要了条数，没读记录内容）。
-  - **已通知 paddock/main**（`corral send`，已送达；回执里 `merged_with_draft` 为 true，它的输入框里当时可能有没发出的草稿）：字段名、格式、版本号 0.3.0。paddock 那边接着做 P5-79。
+- 当时没验证的：真实会话里四种 hook 是不是都记上了时间（后来 cairn/main 在 paddock 里看到了，见“下一步”第 1 条，只差 Claude 的 SessionEnd）；磁盘满、进程被杀时的升级（靠 SQLite 事务，只测了语句失败回滚），这条仍没验证。
 
 ## 现在在哪
 
@@ -38,7 +62,8 @@
   - Codex 的 hook 10-10 装了（用户：“给codex也装上吧”，paddock/main 执行；`~/.codex/hooks.json` 4 处，改前备份 `~/.codex/hooks.json.bak-20261010T071731…`）。直接启动的 Codex 要用户到 `/hooks` 里信任，10-10 20:33 看 paddock 里的 `last_seen`，Codex 四种事件都已有时间（17:43–17:48），触发过了。
   - 已采用的项目：owlet、paddock（paddock 10-10 起，和它的全量 HANDOFF 并存试一两周，10-24 前后用户回看）。owlet 的 HANDOFF 已减到只留稳定背景，进度靠 cairn 的记录，所以**真实数据库不能随手清**。
   - ranch（corral／派活技能）派出去的 agent 一律带 `CAIRN_DISABLE=1`（ranch R2），cairn 只留给用户直接对话的主控。
-- **paddock 已经在用 cairn**：右侧栏第四个标签 Cairn（paddock P5-55，已合并安装）调用 `cairn status --json`、`cairn show --json`、`cairn adopt` 三条，面板开着时每 5 秒读一次（`show` 会顺手收取暂存区）。paddock 接下来的 P5-78 要在面板上显示 `last_seen`（paddock 主控做，等用户看任务文件）。
+- **paddock 已经在用 cairn**：右侧栏第四个标签 Cairn（paddock P5-55，已合并安装）调用 `cairn status --json`、`cairn show --json`、`cairn adopt` 三条，面板开着时每 5 秒读一次（`show` 会顺手收取暂存区）。paddock 的 P5-78 要在面板上显示 `last_seen`；P5-79 要把正文改成记录列表、点开看单条，用 0.3.0 的 `cairn list --json` 和 `cairn show <ID> --json`（都由 paddock 主控做，进度看 paddock 的 HANDOFF）。
+- **真实环境装的是 0.3.0**（main 也是 0.3.0），数据库表结构版本 2。
 - 现在没有开着的 dev / test agent，没有未清理的 worktree 或分支；`cairn-worktrees/` 下只剩共用编译目录 `.target` 和 `p1-lab`。
 - 以下是 10-07 之前各阶段的情况（没变）：
   - **阶段 1（能力实测）已完成**：门槛 A、B、C、F 在 Claude Code 2.1.289 和 Codex 0.160.0 上满足本次实测范围。报告：`docs/调研/第一阶段能力实测.md`；任务与审查记录：`docs/tasks/P1-*.md`。
