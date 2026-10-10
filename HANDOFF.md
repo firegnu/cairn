@@ -1,6 +1,6 @@
 # 交接
 
-2026-10-10，由 paddock/main（paddock 的主控，Claude Code）更新：用户让它直接在本仓库做了 F2，并要求把交接改到最新，好让 cairn 主控下次接手时看到真实情况。上一版（10-07，cairn/main）写的“试点仍等用户点头、先别安装”已经过时。
+2026-10-10，由 paddock/main（paddock 的主控，Claude Code）更新：用户让它直接在本仓库做了 F2，并要求把交接改到最新，好让 cairn 主控下次接手时看到真实情况。上一版（10-07，cairn/main）写的“试点仍等用户点头、先别安装”已经过时。同日 cairn/main 接手后补了“接手后”一节，并改了“下一步”第 1 条和“悬而未决”的错误日志一条。
 
 ## 本次会话（10-10，paddock/main 在本仓库做的）
 
@@ -14,6 +14,15 @@
 - 合并进 main（`8615769`）、推到 origin、worktree 和分支清掉、审查 agent 关掉、收尾提交（`ddfd433`）。main 上 **113 项测试**通过，clippy 干净。
 - **0.2.0 已装到真实环境**：`cargo install --path crates/cairn --locked` 换掉了 `~/.cargo/bin/cairn`（稳定软链接 `~/.local/share/cairn/bin/cairn` 指向它，hook 配置不用改）。装之前把真实数据库整份复制到 `~/.local/state/cairn-backup-20261010-before-v2/`（没打开看内容）。装好后在 paddock 仓库里跑了一次 `cairn show --json`，真实数据库随之升到版本 2；只读核对：`schema_version` 为 2、`PRAGMA integrity_check` ok、和备份逐表比过行数，记录 19、项目 2、事件 66、注入 17 都没变。备份留着，删不删由用户定。
 - 没验证的：真实 Claude Code／Codex 会话里四种 hook 是不是都记上了时间（装好时 `last_seen` 还全是 `null`，要等之后的 hook 触发）；磁盘满、进程被杀时的升级（靠 SQLite 事务，只测了语句失败回滚）。
+
+## 接手后（10-10，cairn/main）
+
+- 重读了本文件和 DESIGN §6.2 版本 2、§7.1、§8.7；F2 的实现代码和任务、审查记录没读，动相关代码前要读。
+- AGENTS.md“合并”一条改成合并后推送到 origin（`64776d7`，用户同意）。没改代码。
+- 只读看了一次试点（17:32 前后，没碰 paddock/main）：
+  - paddock 仓库里 `cairn status`：Claude 的 UserPromptSubmit（17:29）、Stop（17:28）已有时间，是 `last_seen` 第一次在真实会话里记上。SessionStart、SessionEnd 还没有（paddock/main 那个会话是装 0.2.0 之前开的）。Codex 没有记录。暂存区无积压。
+  - cairn 仓库没采用：两家都没有记录，cairn/main 开局也没收到注入，符合设计。
+  - `errors.log` 当天 9 条，全是 claude，都已放行（见“悬而未决”）。用户：“暂时不用了，paddock在跑，他也接了你，直接使用它测试吧”，所以没查，试点直接靠 paddock 用着看。
 
 ## 现在在哪
 
@@ -35,12 +44,13 @@
 
 ## 下一步
 
-1. **看试点**：两家的 hook 是不是真的在触发——在已采用的项目里跑 `cairn status`，看每家“本项目最近触发”那一行（或 `--json` 的 `last_seen`）。Codex 全是空，多半是 `/hooks` 里还没信任。10-24 前后用户回看 paddock 的试点（HANDOFF 瘦不瘦由用户定）。
+1. **看试点**（用户定：直接用 paddock 试）：在已采用的项目里跑 `cairn status`，看每家“本项目最近触发”那一行（或 `--json` 的 `last_seen`）。Claude 的 UserPromptSubmit、Stop 在 paddock 里已确认触发；还没看到的：SessionStart、SessionEnd（等 paddock/main 重开或结束）、重开后注入的内容准不准、Codex（全是空，可能是没开过会话，也可能是 `/hooks` 里还没信任）。10-24 前后用户回看 paddock 的试点（HANDOFF 瘦不瘦由用户定）。
 2. **paddock 还想要、没做的**（见 `docs/调研/与paddock结合.md`，开不开工由用户定）：`cairn list --json`（paddock 要做历史记录列表、点开单条记录）；`show --json` 分节。做的时候按 §7.1 的“只加不改”来，新字段写进 §7.1。
 
 ## 悬而未决
 
 - 端到端冒烟测试已完成（`docs/调研/端到端冒烟测试.md`）：Codex 通过，Claude 条件通过。S1-1：项目规则限制命令时 Claude 可能不确认、续跑后也不确认（cairn 如实记录，不无限续跑）；是否调整注入措辞，试点后由用户决定。
+- `~/.local/state/cairn/errors.log` 10-10 有 9 条，全是 claude，来源没查（用户说暂时不用）：8 条是 SessionStart／SessionEnd 的输入解析失败，集中在 17:06–17:16（F2 施工期间，其中三条在 0.1 秒内，像是拿合成输入直接跑了 `cairn hook claude`，F2 记录里没提，没确认）；1 条是 14:58 的 Stop 处理失败，原因日志里看不出。如果解析失败来自真实会话，说明有些 Claude 会话拿不到注入；之后再出现就要查，查时在隔离目录用合成输入复现。
 - 冒烟遗留物：`p1-lab/smoke/`；私有临时目录下空的 `cairn-spool/d7de8e374f1b8ca2/`；`p1-lab` 两个仓库里各两个未跟踪的合成文件。删不删由用户定。
 - 3c 走查在真实私有临时目录留下空目录 `cairn-spool/7262111286db64b8/`（无文件），删不删由用户定。
 - 升级前的数据库备份 `~/.local/state/cairn-backup-20261010-before-v2/`（版本 1，10-10 17:12 的状态），删不删由用户定。退回 0.1.0 的话要连数据库一起换回备份：0.1.0 不认版本 2 的库（hook 会放行、什么都不做），换回后备份之后的记录就没了。
