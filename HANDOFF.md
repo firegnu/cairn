@@ -23,6 +23,12 @@
   - paddock 仓库里 `cairn status`：Claude 的 UserPromptSubmit（17:29）、Stop（17:28）已有时间，是 `last_seen` 第一次在真实会话里记上。SessionStart、SessionEnd 还没有（paddock/main 那个会话是装 0.2.0 之前开的）。Codex 没有记录。暂存区无积压。
   - cairn 仓库没采用：两家都没有记录，cairn/main 开局也没收到注入，符合设计。
   - `errors.log` 当天 9 条，全是 claude，都已放行（见“悬而未决”）。用户：“暂时不用了，paddock在跑，他也接了你，直接使用它测试吧”，所以没查，试点直接靠 paddock 用着看。
+- 做了 **F3**（paddock P5-79 要的 cairn 这一半，paddock/main 转来，依据见任务书；任务书、完成记录、主控审查：`docs/tasks/F3-list-json与单条记录约定.md`）：
+  - `cairn list --json [--limit N]`：只读（不收取暂存区、不建库、不升级库），输出 `{"total":…,"records":[…]}`，新的在前；没有数据库或没有记录时是 `{"total":0,"records":[]}`。
+  - `cairn list --json` 和 `cairn show <ID> --json` 写进公开约定（DESIGN §7.1）。状态用 `deleted_at`、`replaced_by`、`retracted` 三个字段表示，中文文字数组 `status` 不进约定。
+  - 版本号 0.2.0 → **0.3.0**。Codex（`cairn/dev-list-json-1`，常规档）实现，主控审查通过，没做交叉审查（影响面：改行为）。main 上 **119 项测试**通过，clippy 干净。
+  - 已合并（`2cc973a`）、推送，worktree 和分支已清，dev agent 已关。
+  - **还没做**：0.3.0 没装到真实环境（`~/.cargo/bin/cairn` 还是 0.2.0）；没通知 paddock/main。两步都等用户点头（见“下一步”第 1 条）。
 
 ## 现在在哪
 
@@ -44,8 +50,9 @@
 
 ## 下一步
 
-1. **看试点**（用户定：直接用 paddock 试）：在已采用的项目里跑 `cairn status`，看每家“本项目最近触发”那一行（或 `--json` 的 `last_seen`）。Claude 的 UserPromptSubmit、Stop 在 paddock 里已确认触发；还没看到的：SessionStart、SessionEnd（等 paddock/main 重开或结束）、重开后注入的内容准不准、Codex（全是空，可能是没开过会话，也可能是 `/hooks` 里还没信任）。10-24 前后用户回看 paddock 的试点（HANDOFF 瘦不瘦由用户定）。
-2. **paddock 还想要、没做的**（见 `docs/调研/与paddock结合.md`，开不开工由用户定）：`cairn list --json`（paddock 要做历史记录列表、点开单条记录）；`show --json` 分节。做的时候按 §7.1 的“只加不改”来，新字段写进 §7.1。
+1. **装 0.3.0、通知 paddock/main**（等用户点头）：`cargo install --path crates/cairn --locked` 换掉 `~/.cargo/bin/cairn`（hook 配置不用改，表结构没变，不用备份数据库）；装好后把字段名、格式（DESIGN §7.1 的 `list --json`、`show <ID> --json` 两条）和版本号 0.3.0 告诉 paddock/main，它等这个才开 P5-79。本仓库规矩不许主控对用户的现有 agent 执行 `corral send`，要用户放行或由用户转达。
+2. **看试点**（用户定：直接用 paddock 试）：在已采用的项目里跑 `cairn status`，看每家“本项目最近触发”那一行（或 `--json` 的 `last_seen`）。Claude 的 UserPromptSubmit、Stop 在 paddock 里已确认触发；还没看到的：SessionStart、SessionEnd（等 paddock/main 重开或结束）、重开后注入的内容准不准、Codex（全是空，可能是没开过会话，也可能是 `/hooks` 里还没信任）。10-24 前后用户回看 paddock 的试点（HANDOFF 瘦不瘦由用户定）。
+3. **paddock 还想要、没做的**（见 `docs/调研/与paddock结合.md`，开不开工由用户定）：`show --json`（不带 ID）分节。做的时候按 §7.1 的“只加不改”来，新字段写进 §7.1。
 
 ## 悬而未决
 
