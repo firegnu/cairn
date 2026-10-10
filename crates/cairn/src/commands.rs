@@ -214,6 +214,45 @@ pub(crate) fn list(
     })
 }
 
+pub(crate) fn list_json(
+    connection: &Connection,
+    scope: &crate::scope::Scope,
+    line: bool,
+    all: bool,
+    limit: Option<usize>,
+) -> Result<String> {
+    let records = render::records(
+        connection,
+        scope.project_key.to_str().ok_or("项目路径不是 UTF-8")?,
+    )?;
+    let filtered: Vec<_> = records
+        .iter()
+        .filter(|r| (!line || Path::new(&r.line) == scope.line_path) && (all || r.active()))
+        .collect();
+    let mut entries = Vec::new();
+    let mut source = connection.prepare("SELECT agent,session_id FROM sources WHERE id=?1")?;
+    for record in filtered.iter().take(limit.unwrap_or(usize::MAX)) {
+        let (agent, session_id): (String, Option<String>) =
+            source.query_row([&record.source], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let stopping_point = render::stopping_point(record.body.as_deref().unwrap_or(""));
+        let summary = stopping_point
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("");
+        entries.push(json!({
+            "id": record.id, "created_at": record.at,
+            "agent": agent, "session_id": session_id, "source_id": record.source,
+            "line_path": record.line, "branch": record.branch,
+            "kind": record.kind, "target_id": record.target,
+            "deleted_at": record.deleted_at, "replaced_by": record.replaced_by,
+            "retracted": record.retracted, "summary": summary,
+        }));
+    }
+    Ok(serde_json::to_string(
+        &json!({"total": filtered.len(), "records": entries}),
+    )?)
+}
+
 pub(crate) fn delete(store: &mut Store, id: &str) -> Result<String> {
     match store.delete_body(id, &crate::save::now()) {
         Ok(true) => show(store.connection(), id, false),

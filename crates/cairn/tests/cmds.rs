@@ -88,6 +88,12 @@ impl Fixture {
         serde_json::from_str(&self.run(&["show", id, "--json"], "").unwrap()).unwrap()
     }
 
+    fn list_json(&self, options: &[&str]) -> Value {
+        let mut args = vec!["list", "--json"];
+        args.extend_from_slice(options);
+        serde_json::from_str(&self.run(&args, "").unwrap()).unwrap()
+    }
+
     fn process(&self, args: &[&str], input: &str, terminal: bool) -> Output {
         let (mut writer, stdin) = if terminal {
             let (mut master, mut slave) = (-1, -1);
@@ -884,4 +890,376 @@ fn list_filters_project_and_worktree_while_id_commands_preserve_target_and_facts
     let exported = f.run_in(&other, &["export"], "").unwrap();
     assert!(exported.contains("另一条线") && exported.contains("跨目录更正"));
     assert!(!exported.contains("主线记录") && !exported.contains("其他项目内容"));
+}
+
+#[test]
+fn json_contract_list_empty_limit_arguments_and_errors() {
+    let f = Fixture::new();
+    assert_eq!(
+        Cli::try_parse_from(["cairn", "--version"])
+            .unwrap_err()
+            .to_string(),
+        "cairn 0.3.0\n"
+    );
+    let empty = serde_json::json!({"total": 0, "records": []});
+    assert_eq!(f.list_json(&[]), empty);
+    assert_eq!(f.list_json(&["--line", "--all", "--limit", "0"]), empty);
+    let output = f.process(&["list", "--json"], "", false);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert!(!f.db().parent().unwrap().exists());
+    assert!(!f.root.path().join("cairn-spool").exists());
+    for args in [
+        vec!["cairn", "list", "--limit", "1"],
+        vec!["cairn", "list", "--json", "--limit", "-1"],
+        vec!["cairn", "list", "--json", "--limit", "1.5"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+    // A database with no project, and an adopted project with no records.
+    let store = f.store();
+    assert_eq!(f.list_json(&[]), empty);
+    assert!(!f.root.path().join("cairn-spool").exists());
+    f.run(&["adopt"], "").unwrap();
+    assert_eq!(f.list_json(&[]), empty);
+    let deleted = f.queued("## 停点\n唯一的记录");
+    f.run(&["delete", &deleted, "--yes"], "").unwrap();
+    assert_eq!(f.list_json(&[]), empty);
+    store
+        .connection()
+        .execute_batch("UPDATE meta SET value='999' WHERE key='schema_version'")
+        .unwrap();
+    let output = f.process(&["list", "--json"], "", false);
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(error.lines().count(), 1);
+    assert!(error.contains("version 999 is newer"), "{error}");
+}
+
+#[test]
+fn json_contract_list_reads_v1_without_ingesting_or_upgrading() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let first = f.queued("## 停点\n已收取");
+    f.run(&["list"], "").unwrap();
+    let pending = f.queued("## 停点\n尚未收取");
+    let store = f.store();
+    store
+        .connection()
+        .execute_batch(
+            "DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version';
+         PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    let before = fs::read(f.db()).unwrap();
+    let spool = cairn::spool::Spool::inspect(f.root.path(), &f.db()).unwrap();
+    assert_eq!(spool.pending_json, 1);
+    // Even an existing writer does not prevent a read-only list.
+    store.connection().execute_batch("BEGIN IMMEDIATE").unwrap();
+    let listed = f.list_json(&[]);
+    assert_eq!(listed["total"], 1);
+    assert_eq!(listed["records"][0]["id"], first);
+    assert_eq!(fs::read(f.db()).unwrap(), before);
+    assert_eq!(
+        cairn::spool::Spool::inspect(f.root.path(), &f.db())
+            .unwrap()
+            .pending_json,
+        1
+    );
+    let version: String = store
+        .connection()
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "1");
+    store.connection().execute_batch("ROLLBACK").unwrap();
+    // Text list still collects and upgrades through its existing write path.
+    assert!(f.run(&["list"], "").unwrap().contains(&pending));
+    assert_eq!(f.list_json(&[])["total"], 2);
+}
+
+#[test]
+fn json_contract_list_fields_sources_order_and_limits() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let store = f.store();
+    for agent in ["claude", "codex"] {
+        store
+            .connection()
+            .execute(
+                "INSERT INTO sources VALUES (?1,?2,'synthetic-session','hook',?3,?3)",
+                rusqlite::params![
+                    format!("{agent}:synthetic-session"),
+                    agent,
+                    "2026-10-10T08:50:43.687Z"
+                ],
+            )
+            .unwrap();
+    }
+    let local = f.queued("## 停点\n\n  摘要保留空格  \n第二行\n## 已完成及验证\n正文");
+    let mut ids = vec![local.clone()];
+    for source in [
+        "claude:synthetic-session",
+        "codex:synthetic-session",
+        "codex:never-seen",
+    ] {
+        ids.push(
+            f.run(&["save", "--source", source], "## 停点\n")
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    f.run(&["list"], "").unwrap();
+    // Fixed times make both descending keys observable, independently of ULID timing.
+    store
+        .connection()
+        .execute_batch("UPDATE records SET created_at='2026-10-10T08:50:43.687Z'")
+        .unwrap();
+    store
+        .connection()
+        .execute(
+            "UPDATE records SET created_at='2026-10-11T08:50:43.687Z' WHERE id=?1",
+            [&local],
+        )
+        .unwrap();
+    let listed = f.list_json(&[]);
+    assert_eq!(listed.as_object().unwrap().len(), 2);
+    assert_eq!(listed["total"], 4);
+    let rows = listed["records"].as_array().unwrap();
+    let mut expected_ids = ids[1..].to_vec();
+    expected_ids.sort_by(|a, b| b.cmp(a));
+    expected_ids.insert(0, local.clone());
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        expected_ids
+    );
+    assert_eq!(
+        rows[0],
+        serde_json::json!({
+            "id": local, "created_at": "2026-10-11T08:50:43.687Z",
+            "agent": "local", "session_id": null, "source_id": format!("local:{local}"),
+            "line_path": f.cwd().canonicalize().unwrap(), "branch": null,
+            "kind": "checkpoint", "target_id": null, "deleted_at": null,
+            "replaced_by": null, "retracted": false, "summary": "  摘要保留空格  "
+        })
+    );
+    for (id, agent) in [(&ids[1], "claude"), (&ids[2], "codex"), (&ids[3], "local")] {
+        let row = rows.iter().find(|r| r["id"] == *id).unwrap();
+        assert_eq!(row["agent"], agent);
+        assert_eq!(row["summary"], "");
+        if agent == "local" {
+            assert_eq!(row["session_id"], Value::Null);
+            assert_eq!(row["source_id"], format!("local:{id}"));
+        } else {
+            assert_eq!(row["session_id"], "synthetic-session");
+            assert_eq!(row["source_id"], format!("{agent}:synthetic-session"));
+        }
+        // The single-record contract has the same metadata, without summary.
+        let shown = f.show(id);
+        for (key, value) in row
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| *key != "summary")
+        {
+            assert_eq!(&shown[key], value, "{key}");
+        }
+    }
+    for limit in [0, 1, 2, 10] {
+        let limited = f.list_json(&["--limit", &limit.to_string()]);
+        assert_eq!(limited["total"], 4);
+        assert_eq!(limited["records"], serde_json::json!(&rows[..limit.min(4)]));
+    }
+    let text = f.run(&["list"], "").unwrap();
+    assert!(text
+        .lines()
+        .next()
+        .unwrap()
+        .ends_with(" ·   摘要保留空格  "));
+}
+
+#[test]
+fn json_contract_list_visibility_all_kinds_and_filtered_totals() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let replaced = f.queued("## 停点\n被取代");
+    let replacement = f.queued("## 停点\n接手");
+    let deleted = f.queued("## 停点\n待删除");
+    let retracted = f.queued("## 停点\n待撤回");
+    let restored = f.queued("## 停点\n待恢复");
+    f.run(&["correct", &replacement], "## 停点\n更正").unwrap();
+    f.run(&["retract", &retracted], "").unwrap();
+    f.run(&["retract", &restored], "").unwrap();
+    f.run(&["restore", &restored], "").unwrap();
+    f.run(&["delete", &deleted, "--yes"], "").unwrap();
+    f.store()
+        .connection()
+        .execute(
+            "INSERT INTO supersessions VALUES (?1,?2)",
+            [&replacement, &replaced],
+        )
+        .unwrap();
+    let visible = f.list_json(&[]);
+    assert_eq!(visible["total"], 6);
+    let rows = visible["records"].as_array().unwrap();
+    for row in rows {
+        assert_eq!(row["deleted_at"], Value::Null);
+        assert_eq!(row["replaced_by"], Value::Null);
+        assert_eq!(row["retracted"], false);
+    }
+    for kind in ["checkpoint", "correction", "retraction", "restore"] {
+        assert!(rows.iter().any(|r| r["kind"] == kind));
+    }
+    for row in rows.iter().filter(|r| r["kind"] != "checkpoint") {
+        assert_eq!(row["agent"], "local");
+        assert_eq!(row["session_id"], Value::Null);
+        assert!([&replacement, &retracted, &restored]
+            .iter()
+            .any(|id| row["target_id"] == **id));
+        if row["kind"] != "correction" {
+            assert_eq!(row["summary"], "");
+        }
+    }
+    let all = f.list_json(&["--all"]);
+    assert_eq!(all["total"], 9);
+    let rows = all["records"].as_array().unwrap();
+    assert_eq!(
+        rows.iter().find(|r| r["id"] == replaced).unwrap()["replaced_by"],
+        replacement
+    );
+    assert_eq!(
+        rows.iter().find(|r| r["id"] == retracted).unwrap()["retracted"],
+        true
+    );
+    let tombstone = rows.iter().find(|r| r["id"] == deleted).unwrap();
+    assert!(tombstone["deleted_at"].is_string());
+    assert_eq!(tombstone["summary"], "");
+    assert_eq!(f.list_json(&["--limit", "1"])["total"], 6);
+    assert_eq!(f.list_json(&["--all", "--limit", "1"])["total"], 9);
+}
+
+#[test]
+fn json_contract_list_filters_worktrees_and_projects_before_limit() {
+    let f = Fixture::new();
+    f.git(&["init", "-b", "main"]);
+    f.git(&["commit", "--allow-empty", "-m", "synthetic"]);
+    let other = f.root.path().join("other");
+    f.git(&["worktree", "add", "-b", "side", other.to_str().unwrap()]);
+    f.run(&["adopt"], "").unwrap();
+    let main = f.queued("## 停点\n主线");
+    f.run_in(&other, &["save"], "## 停点\n侧线").unwrap();
+    let foreign = f.root.path().join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    let empty: Value =
+        serde_json::from_str(&f.run_in(&foreign, &["list", "--json"], "").unwrap()).unwrap();
+    assert_eq!(empty, serde_json::json!({"total": 0, "records": []}));
+    f.run_in(&foreign, &["adopt"], "").unwrap();
+    f.run_in(&foreign, &["save"], "## 停点\n其他项目").unwrap();
+    f.run(&["list"], "").unwrap();
+    let listed = f.list_json(&[]);
+    assert_eq!(listed["total"], 2);
+    assert!(listed["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["branch"] == "side"));
+    let line = f.list_json(&["--line", "--all", "--limit", "1"]);
+    assert_eq!(line["total"], 1);
+    assert_eq!(line["records"][0]["id"], main);
+    assert_eq!(line["records"][0]["branch"], "main");
+    assert_eq!(
+        line["records"][0]["line_path"],
+        f.cwd().canonicalize().unwrap().to_str().unwrap()
+    );
+    f.run(&["unadopt"], "").unwrap();
+    assert_eq!(f.list_json(&[]), listed);
+    let shown: Value =
+        serde_json::from_str(&f.run_in(&foreign, &["show", &main, "--json"], "").unwrap()).unwrap();
+    assert_eq!(shown["id"], main);
+    assert_eq!(shown["body"], "## 停点\n主线");
+}
+
+#[test]
+fn json_contract_show_collects_upgrades_and_preserves_body_and_correction() {
+    let f = Fixture::new();
+    let output = f.process(&["show", "absent", "--json"], "", false);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .ends_with("{\"status\":\"no_data\"}\n"));
+    assert!(!f.db().exists());
+    f.run(&["adopt"], "").unwrap();
+    let body = "## 停点\n原始 **Markdown**\n\n第二段\n";
+    let id = f.queued(body);
+    let spool = cairn::spool::Spool::inspect(f.root.path(), &f.db()).unwrap();
+    let path = spool.path.join(format!("{id}.json"));
+    let raw = fs::read_to_string(&path).unwrap();
+    let operation: cairn::save::Operation = serde_json::from_str(&raw).unwrap();
+    // Keep the spool's two-line header/payload framing intact.
+    fs::write(
+        &path,
+        raw.replace(&operation.payload.created_at, "2026-10-10T08:50:43.687Z"),
+    )
+    .unwrap();
+    let store = f.store();
+    store
+        .connection()
+        .execute_batch("DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version'")
+        .unwrap();
+    let shown = f.show(&id);
+    assert_eq!(shown["body"], body);
+    assert_eq!(shown["created_at"], "2026-10-10T08:50:43.687Z");
+    assert_eq!(shown["correction"], Value::Null);
+    assert!(!path.exists());
+    let version: String = store
+        .connection()
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "2");
+    for key in [
+        "project_id",
+        "project_key",
+        "association",
+        "facts",
+        "status",
+    ] {
+        assert!(shown.get(key).is_some(), "preserve existing field {key}");
+    }
+    f.run(&["correct", &id], "## 停点\n旧更正").unwrap();
+    let latest = f.run(&["correct", &id], "## 停点\n最新更正").unwrap();
+    let latest = latest.split_whitespace().nth(1).unwrap();
+    let corrected = f.show(&id);
+    assert_eq!(corrected["body"], body);
+    let mut correction = f.show(latest);
+    assert_eq!(correction["body"], "## 停点\n最新更正");
+    assert_eq!(correction["target_id"], id);
+    assert_eq!(correction["agent"], "local");
+    assert_eq!(correction["session_id"], Value::Null);
+    correction.as_object_mut().unwrap().remove("correction");
+    assert_eq!(corrected["correction"], correction);
+    for action in ["retract", "restore"] {
+        let result = f.run(&[action, &id], "").unwrap();
+        let action_id = result.split_whitespace().nth(1).unwrap();
+        assert_eq!(f.show(action_id)["body"], Value::Null);
+    }
+    f.run(&["delete", &id, "--yes"], "").unwrap();
+    let tombstone = f.show(&id);
+    assert_eq!(tombstone["body"], Value::Null);
+    assert_eq!(tombstone["correction"], Value::Null);
+    let output = f.process(&["show", "absent", "--json"], "", false);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "记录不存在\n");
 }

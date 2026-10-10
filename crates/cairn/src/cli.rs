@@ -85,6 +85,10 @@ pub enum Command {
         line: bool,
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, requires = "json")]
+        limit: Option<usize>,
     },
     Export {
         path: Option<PathBuf>,
@@ -251,7 +255,25 @@ pub fn run_at(
             }
             crate::commands::delete(&mut store, &id)
         }
-        Command::List { line, all } => {
+        Command::List {
+            line,
+            all,
+            json: true,
+            limit,
+        } => {
+            let Some(mut store) = crate::store::Store::open_read_only(
+                database,
+                crate::store::BusyTimeout::UserCommand,
+            )?
+            else {
+                return Ok("{\"total\":0,\"records\":[]}".into());
+            };
+            let tx = store.transaction(rusqlite::TransactionBehavior::Deferred)?;
+            let output = crate::commands::list_json(&tx, &scope, line, all, limit)?;
+            tx.commit()?;
+            Ok(output)
+        }
+        Command::List { line, all, .. } => {
             let Some(mut store) = existing_store(database, root)? else {
                 return Ok("尚无数据".into());
             };
