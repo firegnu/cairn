@@ -183,6 +183,22 @@ CREATE TABLE spool_ops (                                                -- 已�
 - 同一回合的去重靠唯一键加"插入冲突则忽略"，不靠先读后写。
 - 取代、撤回、恢复之间"谁在先"按入库顺序判定（`records` 的 rowid，即提交顺序），不按 `created_at`：本机时钟可能回拨，暂存文件也可能晚收。因此 cairn 不对数据库执行 VACUUM（VACUUM 可能重排没有 INTEGER PRIMARY KEY 的表的 rowid）。
 
+**版本 2（F2，2026-10-10）**：加一张表，记每个项目里每家 agent 的每种 hook 事件最近一次被处理的时间。v1 的表和数据一概不动。
+
+```sql
+CREATE TABLE hook_seen (                                                -- 每个 (项目, agent, 事件) 只留一行
+  project_id INTEGER NOT NULL REFERENCES projects(id),
+  agent TEXT NOT NULL,                                                  -- claude / codex
+  event TEXT NOT NULL,                                                  -- SessionStart / UserPromptSubmit / Stop / SessionEnd（agent 自己的事件名）
+  at TEXT NOT NULL,                                                     -- 最近一次，RFC 3339 UTC 毫秒
+  PRIMARY KEY (project_id, agent, event));
+```
+
+- 为什么单开一张表：`events` 只记来源和时间、不记项目，按项目回答不了"hook 最近触发过没有"；Stop 也没有对应的事件行。单开一张表不用改旧表、不用回填，行数有上限（项目数 × 2 × 4），不随使用增长。
+- 写入时机见 §8.7。同一行用"插入冲突则取较大的时间"更新，时钟回拨不会把时间改小。
+- 升级：读写方式打开数据库时，在一个立即事务里补上还没有的版本（v0→v1→v2），并把 `meta.schema_version` 改成 2；并发打开时后到的一个看到已是 2 就跳过，或者拿到 SQLITE_BUSY（和首次建库一样，调用方当作可重试）。只读方式打开不升级：v1 的库照样能读，只是没有 `hook_seen`，读的一方（`status`）要自己看这张表在不在。比当前版本新的库照旧拒绝、不改动。
+- 旧程序（0.1.0）遇到已升到 v2 的库会按"版本更新"拒绝，hook 照 §8.6 放行；所以升级程序和升级数据库是同一步，不要让新旧两个程序混用同一个库。
+
 ### 6.3 正文格式
 
 正文是 UTF-8 Markdown，有固定的小标题。程序只检查以下几点，不判断内容对不对：
@@ -272,6 +288,26 @@ cairn status [--json]
 - **退出码**：`cairn hook` 一律 0（§8.6）。用户命令出错时返回非 0，并在 stderr 给出一行说明。
 - **`save` 的写入**：校验正文、采集事实，把记录写进暂存区（§6.5），不碰数据库。取代对象、项目是否采用，在收取时核对。stdout 只输出一行，例如 `saved r-01J… blog · main · 9c1e2ab`。
 
+### 7.1 公开约定：别的程序可以依赖的输出（F2，2026-10-10）
+
+paddock（GPUI 桌面前端）的 Cairn 面板调用下面三条命令。这里列出的字段和行为是公开约定：**只加不改**——可以加新字段、新取值，已列出的字段名、类型、含义和退出码不改、不删；非改不可时，先在这里写明、和调用方商定，再动代码。调用方要忽略不认识的字段。没列在这里的输出（各命令给人看的文字、`status --json` 里其余字段、`show <ID> --json`）不是约定，可能变。
+
+**`cairn status [--json]`**：只读，不收取暂存区，不创建也不升级数据库。在调用时的当前目录所在的项目里回答。退出码 0；出错（比如当前目录解析失败）退出码 1、stderr 一行原因。`--json` 的 stdout 是一个 JSON 对象，其中：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `agents.claude.installed`、`agents.codex.installed` | 布尔 | 这家 agent 的四个 hook 都已写进它的用户级配置（Claude 还要有放行 `save` 的规则）。只看配置文件，不代表 hook 真的会触发（Codex 的信任状态读不到） |
+| `agents.<名字>.last_seen` | 对象 | 四个键 `SessionStart`、`UserPromptSubmit`、`Stop`、`SessionEnd`，值是这家 agent 的这种 hook 在**当前项目**里最近一次被 cairn 处理的时间（RFC 3339 UTC 毫秒，如 `2026-10-10T08:50:43.687Z`），没有记录是 `null`。四个键总在。记法和限制见 §8.7。0.1.0 没有这个字段，调用方把缺字段当作"不知道" |
+| `project.status` | 字符串 | `adopted`（已采用）、`not_adopted`（有数据库、这个项目没采用）、`no_data`（还没有数据库） |
+| `spool.pending_json` | 非负整数 | 暂存区里还没收取的保存操作数 |
+
+**`cairn show --json`**（不带 ID）：会先收取暂存区（所以会写数据库，旧版本的库也在这时升级）。退出码 0。stdout 是一个 JSON 对象，两种形状：
+
+- 还没有数据库：`{"status":"no_data"}`。
+- 否则：`text`（字符串，和 SessionStart 完整注入相同的全文，Markdown；项目没采用时只有抬头）和 `record_ids`（字符串数组，这段文字里包含的记录 ID，按出现顺序）。
+
+**`cairn adopt`**：采用当前目录所在的项目，立即生效；已采用时再运行也成功。成功退出码 0，stdout 一行 `adopted <项目键>`；失败退出码 1，stderr 一行原因。`unadopt` 对称（`unadopted <项目键>`）。
+
 ## 8. 流程
 
 ### 8.1 SessionStarted
@@ -356,6 +392,18 @@ save 进程里：
 - `cairn hook` 不管遇到什么错误都退出 0：数据库忙、Git 超时、输入解析失败，一律放行，不注入。
 - 错误写进 `${XDG_STATE_HOME}/cairn/errors.log`，最多保留若干行。
 - 不使用退出码 2：对 Stop 来说，退出码 2 代表续跑。
+
+### 8.7 hook 最近触发时间（F2，2026-10-10）
+
+用来回答"这家 agent 的 hook 在这个项目里到底触发过没有"（装了不等于会触发，比如 Codex 的 hook 没被信任）。`cairn status` 按当前项目报出来（§7.1 的 `last_seen`）。
+
+- 四种事件各自在处理它的那个写事务里，把 `hook_seen` 里（项目，agent，事件）这一行的时间更新为本次收到的时间（§6.2）：SessionStart 在记 `session_started` 之后；UserPromptSubmit 在记 `turn_started` 之后；Stop 在写事务里确认项目已采用之后、判定之前（所以判定结果是什么都记，包括因收取出错而不续跑的那种）；SessionEnd 在记 `session_ended` 之后。
+- 只记"cairn 处理到了"的，所以有三个限制，读的一方要知道：
+  - 没采用的项目不记（hook 照 §8.1、§8.3 什么都不写），`last_seen` 全是 `null`；采用之前触发过的也不算。
+  - 设了 `CAIRN_DISABLE=1` 的会话不记（比如派出去的 agent）。
+  - hook 触发了但处理出错（数据库忙、输入解析失败、Git 超时）不记：事务没提交。所以 `null` 或时间很旧，可能是没触发，也可能是每次都出错，要再看 `errors.log`。
+- 取消采用后已有的行留着（和记录一样），`status` 照样报；重新采用后接着更新。
+- 不记内容：只有项目、哪家、哪种事件、时间，没有会话 ID、提示词或回答。
 
 ## 9. 注入与提示文字
 

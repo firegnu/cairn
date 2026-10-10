@@ -71,6 +71,7 @@ pub fn start(event: &SessionStarted<'_>, database: &Path, root: &Path) -> Result
         "INSERT INTO events(source_id,kind,at,detail) VALUES (?1,'session_started',?2,?3)",
         params![source_id, at, kind],
     )?;
+    crate::turn::hook_seen(&tx, key, event.agent, "SessionStart", &at)?;
     let rendered = crate::render::render(
         &tx,
         &crate::render::Request {

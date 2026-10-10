@@ -154,6 +154,7 @@ fn unadopted_events_are_silent_and_do_not_create_storage() {
         "records",
         "spool_ops",
         "turn_decisions",
+        "hook_seen",
     ] {
         let count: i64 = store
             .connection()
@@ -541,4 +542,141 @@ fn start_kinds_missing_turn_key_and_unknown_event_follow_mapping() {
         );
     }
     assert!(!f.db().with_file_name("errors.log").exists());
+}
+
+const EVENTS: [&str; 4] = ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"];
+
+/// hook_seen as (agent, event, at), in that order.
+fn seen(f: &Fixture) -> Vec<(String, String, String)> {
+    let connection = rusqlite::Connection::open(f.db()).unwrap();
+    let mut query = connection
+        .prepare("SELECT agent, event, at FROM hook_seen ORDER BY agent, event")
+        .unwrap();
+    let rows = query
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    rows
+}
+
+fn last_seen(f: &Fixture, agent: &str, event: &str) -> Value {
+    let status: Value = serde_json::from_str(&f.run(&["status", "--json"], "")).unwrap();
+    let all = status["agents"][agent]["last_seen"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{agent} has no last_seen: {status}"));
+    assert_eq!(all.len(), EVENTS.len(), "{all:?}");
+    all[event].clone()
+}
+
+#[test]
+fn each_handled_event_is_remembered_for_its_project_and_agent_and_status_reports_it() {
+    let f = Fixture::new();
+    f.init_git();
+    f.run(&["adopt"], "");
+    for agent in ["claude", "codex"] {
+        for event in EVENTS {
+            assert_eq!(last_seen(&f, agent, event), Value::Null, "{agent} {event}");
+        }
+    }
+
+    for case in ["session_start", "user_prompt_submit", "stop", "session_end"] {
+        f.hook("claude", case);
+    }
+    // An event cairn does not handle leaves nothing.
+    f.hook("codex", "interrupt");
+    let rows = seen(&f);
+    assert_eq!(
+        rows.iter()
+            .map(|(agent, event, _)| (agent.as_str(), event.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("claude", "SessionEnd"),
+            ("claude", "SessionStart"),
+            ("claude", "Stop"),
+            ("claude", "UserPromptSubmit"),
+        ]
+    );
+    for (_, event, at) in &rows {
+        assert!(at.len() == 24 && at.ends_with('Z'), "{event} at {at}");
+        assert_eq!(last_seen(&f, "claude", event), Value::String(at.clone()));
+        assert_eq!(last_seen(&f, "codex", event), Value::Null);
+    }
+
+    // A later one replaces the time; there is still one row for it.
+    let stop = |f: &Fixture| last_seen(f, "claude", "Stop").as_str().unwrap().to_owned();
+    let before = stop(&f);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    f.hook("claude", "stop_continued");
+    assert!(stop(&f) > before, "{} against {before}", stop(&f));
+    assert_eq!(seen(&f).len(), 4);
+
+    // `status` only reads: asking changed nothing.
+    let rows = seen(&f);
+    last_seen(&f, "claude", "Stop");
+    assert_eq!(seen(&f), rows);
+}
+
+#[test]
+fn nothing_is_remembered_while_disabled_or_once_unadopted() {
+    let f = Fixture::new();
+    f.init_git();
+    f.run(&["adopt"], "");
+    f.hook("codex", "session_start");
+    let rows = seen(&f);
+    assert_eq!(rows.len(), 1);
+
+    std::env::set_var("CAIRN_DISABLE", "1");
+    for &(agent, case) in CASES {
+        f.hook(agent, case);
+    }
+    std::env::remove_var("CAIRN_DISABLE");
+    assert_eq!(seen(&f), rows);
+
+    f.run(&["unadopt"], "");
+    for &(agent, case) in CASES {
+        f.hook(agent, case);
+    }
+    assert_eq!(seen(&f), rows);
+    // What it saw while adopted is still reported.
+    assert_eq!(
+        last_seen(&f, "codex", "SessionStart"),
+        Value::String(rows[0].2.clone())
+    );
+}
+
+#[test]
+fn version_1_database_reports_nothing_seen_until_a_hook_upgrades_it() {
+    let f = Fixture::new();
+    f.init_git();
+    f.run(&["adopt"], "");
+    // As cairn 0.1.0 left it: no hook_seen, version 1.
+    let connection = rusqlite::Connection::open(f.db()).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE hook_seen; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    let version = |connection: &rusqlite::Connection| -> String {
+        connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
+    let status: Value = serde_json::from_str(&f.run(&["status", "--json"], "")).unwrap();
+    assert_eq!(status["project"]["status"], "adopted");
+    for agent in ["claude", "codex"] {
+        for event in EVENTS {
+            assert_eq!(last_seen(&f, agent, event), Value::Null, "{agent} {event}");
+        }
+    }
+    assert_eq!(version(&connection), "1");
+
+    assert!(!f.hook("claude", "session_start").is_empty());
+    assert_eq!(version(&connection), "2");
+    assert!(last_seen(&f, "claude", "SessionStart").is_string());
 }

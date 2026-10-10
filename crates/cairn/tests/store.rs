@@ -78,7 +78,7 @@ fn migration_is_idempotent_and_preserves_data() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "1");
+    assert_eq!(version, "2");
     let tables: Vec<String> = store
         .connection()
         .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
@@ -92,6 +92,7 @@ fn migration_is_idempotent_and_preserves_data() {
         [
             "confirmations",
             "events",
+            "hook_seen",
             "injections",
             "meta",
             "projects",
@@ -158,7 +159,7 @@ fn newer_schema_is_rejected_without_changing_the_database() {
     connection
         .execute_batch(
             "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        INSERT INTO meta VALUES ('schema_version', '2');
+        INSERT INTO meta VALUES ('schema_version', '3');
         CREATE TABLE future_data (value TEXT);
         INSERT INTO future_data VALUES ('synthetic future data');",
         )
@@ -169,7 +170,7 @@ fn newer_schema_is_rejected_without_changing_the_database() {
     let before = fs::read(&path).unwrap();
     assert!(matches!(
         Store::open(&path, BusyTimeout::Hook),
-        Err(Error::NewerSchema { found: 2 })
+        Err(Error::NewerSchema { found: 3 })
     ));
     assert!(
         fs::read(&path).unwrap() == before,
@@ -401,7 +402,7 @@ fn newer_version_in_wal_is_rejected_by_both_open_modes_without_rewriting_data() 
         .connection()
         .execute_batch(
             "PRAGMA wal_checkpoint(TRUNCATE);
-        UPDATE meta SET value = '2' WHERE key = 'schema_version';
+        UPDATE meta SET value = '3' WHERE key = 'schema_version';
         CREATE TABLE future_data (value TEXT);
         INSERT INTO future_data VALUES ('synthetic WAL-only data');",
         )
@@ -410,11 +411,11 @@ fn newer_version_in_wal_is_rejected_by_both_open_modes_without_rewriting_data() 
     let wal_before = fs::read(sidecar(&path, "-wal")).unwrap();
     assert!(matches!(
         Store::open(&path, BusyTimeout::Hook),
-        Err(Error::NewerSchema { found: 2 })
+        Err(Error::NewerSchema { found: 3 })
     ));
     assert!(matches!(
         Store::open_read_only(&path, BusyTimeout::Hook),
-        Err(Error::NewerSchema { found: 2 })
+        Err(Error::NewerSchema { found: 3 })
     ));
     assert!(fs::read(&path).unwrap() == db_before, "future DB changed");
     assert!(
@@ -619,7 +620,7 @@ fn preflight_rejects_closed_wide_future_wal_without_creating_sidecars() {
     writer
         .connection()
         .execute(
-            "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+            "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
             [],
         )
         .unwrap();
@@ -691,7 +692,7 @@ fn concurrent_first_open_leaves_a_complete_database_after_success_or_busy() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "1");
+    assert_eq!(version, "2");
     let tables: i64 = store
         .connection()
         .query_row(
@@ -700,5 +701,166 @@ fn concurrent_first_open_leaves_a_complete_database_after_success_or_busy() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(tables, 10);
+    assert_eq!(tables, 11);
+}
+
+/// A database as cairn 0.1.0 left it: the frozen version 1 schema and a little data.
+fn version_1_database(path: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = Connection::open(path).unwrap();
+    original.pragma_update(None, "journal_mode", "WAL").unwrap();
+    original
+        .execute_batch(include_str!("fixtures/schema_v1.sql"))
+        .unwrap();
+    original
+        .execute_batch(
+            "INSERT INTO projects (key, adopted) VALUES ('synthetic-project', 1);
+            INSERT INTO events (source_id, kind, at, detail)
+            VALUES ('claude:synthetic', 'turn_started', '2026-01-01T00:00:00.000Z', NULL);",
+        )
+        .unwrap();
+    drop(original);
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+fn stored_version(path: &Path) -> String {
+    Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn version_1_database_reads_as_it_is_and_a_writable_open_upgrades_it_keeping_its_data() {
+    let root = tempdir().unwrap();
+    let path = isolated_path(root.path());
+    version_1_database(&path);
+    let before = schema(&Connection::open(&path).unwrap());
+
+    // Reading never upgrades: hooks and `status` look before they write.
+    let reader = Store::open_read_only(&path, BusyTimeout::Hook)
+        .unwrap()
+        .expect("a version 1 database is readable");
+    let adopted: bool = reader
+        .connection()
+        .query_row(
+            "SELECT adopted FROM projects WHERE key = 'synthetic-project'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(adopted);
+    drop(reader);
+    assert_eq!(stored_version(&path), "1");
+    assert_eq!(schema(&Connection::open(&path).unwrap()), before);
+
+    // Writing upgrades once: version 2 adds hook_seen and touches nothing else.
+    let store = Store::open(&path, BusyTimeout::UserCommand).unwrap();
+    assert_eq!(stored_version(&path), "2");
+    let after = schema(store.connection());
+    let added: Vec<_> = after
+        .iter()
+        .filter(|entry| !before.contains(entry))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(added, ["hook_seen"]);
+    assert!(before.iter().all(|entry| after.contains(entry)));
+    let kept: (i64, i64, i64) = store
+        .connection()
+        .query_row(
+            "SELECT (SELECT count(*) FROM projects), (SELECT count(*) FROM events),
+                    (SELECT count(*) FROM hook_seen)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(kept, (1, 1, 0));
+    drop(store);
+
+    // And a second writable open changes nothing more.
+    let again = Store::open(&path, BusyTimeout::Hook).unwrap();
+    assert_eq!(schema(again.connection()), after);
+    assert_eq!(stored_version(&path), "2");
+}
+
+#[test]
+fn hook_seen_keeps_one_row_for_each_project_agent_and_event() {
+    let root = tempdir().unwrap();
+    let path = isolated_path(root.path());
+    let store = Store::open(&path, BusyTimeout::UserCommand).unwrap();
+    let c = store.connection();
+    c.execute(
+        "INSERT INTO projects (key, adopted) VALUES ('synthetic-project', 1)",
+        [],
+    )
+    .unwrap();
+    let insert = "INSERT INTO hook_seen (project_id, agent, event, at) VALUES (1, ?1, ?2, ?3)";
+    c.execute(insert, ["claude", "Stop", "2026-01-01T00:00:00.000Z"])
+        .unwrap();
+    assert!(c
+        .execute(insert, ["claude", "Stop", "2026-01-02T00:00:00.000Z"])
+        .is_err());
+    assert!(c
+        .execute(insert, ["claude", "Interrupt", "2026-01-02T00:00:00.000Z"])
+        .is_err());
+    assert!(c
+        .execute(insert, ["gemini", "Stop", "2026-01-02T00:00:00.000Z"])
+        .is_err());
+    assert!(c
+        .execute(
+            "INSERT INTO hook_seen (project_id, agent, event, at) VALUES (9, 'codex', 'Stop', 'x')",
+            []
+        )
+        .is_err());
+    c.execute(insert, ["codex", "Stop", "2026-01-02T00:00:00.000Z"])
+        .unwrap();
+}
+
+#[test]
+fn concurrent_upgrade_of_a_version_1_database_adds_hook_seen_once_and_keeps_its_data() {
+    let root = tempdir().unwrap();
+    let path = isolated_path(root.path());
+    version_1_database(&path);
+    let start = std::sync::Barrier::new(3);
+    let results = std::thread::scope(|scope| {
+        let open = || {
+            start.wait();
+            Store::open(&path, BusyTimeout::Hook).map(drop)
+        };
+        let first = scope.spawn(open);
+        let second = scope.spawn(open);
+        start.wait();
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert!(
+        results.iter().any(Result::is_ok),
+        "both upgrades failed: {results:?}"
+    );
+    for result in &results {
+        if let Err(error) = result {
+            assert!(
+                matches!(error, Error::Sqlite(error)
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)),
+                "unexpected upgrade error: {error}"
+            );
+        }
+    }
+    let store = Store::open(&path, BusyTimeout::UserCommand).unwrap();
+    assert_eq!(stored_version(&path), "2");
+    let counts: (i64, i64, i64, String) = store
+        .connection()
+        .query_row(
+            "SELECT (SELECT count(*) FROM sqlite_schema WHERE name = 'hook_seen'),
+                    (SELECT count(*) FROM projects), (SELECT count(*) FROM events),
+                    (SELECT * FROM pragma_integrity_check)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (1, 1, 1, "ok".into()));
 }

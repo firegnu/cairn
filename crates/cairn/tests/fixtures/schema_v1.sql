@@ -1,4 +1,4 @@
-pub(super) const V1: &str = r#"
+-- The version 1 schema as shipped (cairn 0.1.0), frozen: what a database made before version 2 holds.
 CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
 CREATE TABLE projects (
     id INTEGER PRIMARY KEY,
@@ -66,16 +66,4 @@ CREATE INDEX records_target ON records (target_id);
 CREATE INDEX supersessions_target ON supersessions (target_id);
 CREATE INDEX confirmations_source_time ON confirmations (source_id, at);
 CREATE INDEX events_source_time ON events (source_id, at);
-"#;
-
-/// Version 2 adds the latest time each hook event was handled, by project and agent
-/// (DESIGN §6.2). It only adds: a version 1 database keeps every table and row it has.
-pub(super) const V2: &str = r#"
-CREATE TABLE hook_seen (
-    project_id INTEGER NOT NULL REFERENCES projects(id),
-    agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
-    event TEXT NOT NULL CHECK (event IN ('SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd')),
-    at TEXT NOT NULL,
-    PRIMARY KEY (project_id, agent, event)
-);
-"#;
+INSERT INTO meta (key, value) VALUES ('schema_version', '1');

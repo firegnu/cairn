@@ -53,6 +53,30 @@ fn agent_status(paths: &Paths, agent: Agent) -> Result<Value> {
     )
 }
 
+/// (agent, event, at) for this project. A version 1 database has no hook_seen yet
+/// and status never writes, so it reports nothing seen.
+fn last_seen(
+    connection: &rusqlite::Connection,
+    project_key: &str,
+) -> rusqlite::Result<Vec<(String, String, String)>> {
+    let known: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='hook_seen')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !known {
+        return Ok(Vec::new());
+    }
+    let mut query = connection.prepare(
+        "SELECT h.agent,h.event,h.at FROM hook_seen h JOIN projects p ON p.id=h.project_id
+         WHERE p.key=?1",
+    )?;
+    let rows = query.query_map([project_key], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    rows.collect()
+}
+
 pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Result<String> {
     let paths = Paths::from_env()?;
     let mut agents = serde_json::Map::new();
@@ -66,12 +90,15 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
     let scope = crate::scope::Git::default().resolve(cwd)?;
     let store =
         crate::store::Store::open_read_only(database, crate::store::BusyTimeout::UserCommand)?;
+    let project_key = scope.project_key.to_str().ok_or("项目路径必须是 UTF-8")?;
+    let mut seen = Vec::new();
     let project_status = if let Some(store) = store {
+        seen = last_seen(store.connection(), project_key)?;
         let adopted = store
             .connection()
             .query_row(
                 "SELECT adopted FROM projects WHERE key=?1",
-                [scope.project_key.to_str().ok_or("项目路径必须是 UTF-8")?],
+                [project_key],
                 |row| row.get::<_, bool>(0),
             )
             .optional()?
@@ -84,6 +111,17 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
     } else {
         "no_data"
     };
+    for (name, agent) in agents.iter_mut() {
+        let mut events = serde_json::Map::new();
+        for event in EVENTS {
+            let at = seen
+                .iter()
+                .find(|(a, e, _)| a == name && e == event)
+                .map(|(_, _, at)| at.as_str());
+            events.insert(event.into(), at.into());
+        }
+        agent["last_seen"] = events.into();
+    }
     let spool = crate::spool::Spool::inspect(root, database)?;
     let is_symlink = paths.stable.is_symlink();
     let valid = is_symlink
@@ -117,6 +155,18 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
         if let Some(error) = a["error"].as_str() {
             text.push_str(&format!("  配置错误：{error}\n"));
         }
+        let fired: Vec<String> = EVENTS
+            .iter()
+            .filter_map(|event| Some(format!("{event} {}", a["last_seen"][event].as_str()?)))
+            .collect();
+        text.push_str(&format!(
+            "  本项目最近触发：{}\n",
+            if fired.is_empty() {
+                "没有记录".into()
+            } else {
+                fired.join("；")
+            }
+        ));
     }
     text.push_str(&format!(
         "稳定软链接：{}（{}）\n项目：{}（{}）\n暂存区：{}；待收取 .json：{}；残留 .tmp：{}\n",

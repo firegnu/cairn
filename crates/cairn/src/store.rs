@@ -11,7 +11,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 
 mod schema;
 
-pub const SCHEMA_VERSION: u64 = 1;
+pub const SCHEMA_VERSION: u64 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -118,7 +118,8 @@ impl Store {
         Ok(store)
     }
 
-    /// Open an existing v1 WAL database without migration or chmod. Missing paths
+    /// Open an existing WAL database of any supported version without migration or chmod:
+    /// version 2 only adds a table, so readers of an older one must not expect it. Missing paths
     /// return None; the same path safety checks as open apply before SQLite access,
     /// including to sidecars even when the database is absent. SQLite may create WAL
     /// sidecars for an existing database, but never the database or its directory.
@@ -131,7 +132,7 @@ impl Store {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         connection.busy_timeout(timeout.duration())?;
-        if schema_version(&connection)? != SCHEMA_VERSION {
+        if schema_version(&connection)? == 0 {
             return Err(Error::InvalidSchemaVersion);
         }
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -151,16 +152,23 @@ impl Store {
         Ok(self.connection.transaction_with_behavior(behavior)?)
     }
 
-    /// Initialize an unversioned empty database atomically; v1 is a no-op.
+    /// Bring an unversioned empty database or an older one to the current version atomically:
+    /// each step it has not had, in order. The current version is a no-op.
     pub fn migrate(&mut self) -> Result<()> {
         if schema_version(&self.connection)? == SCHEMA_VERSION {
             return Ok(());
         }
         let tx = self.transaction(TransactionBehavior::Immediate)?;
-        if schema_version(&tx)? == 0 {
-            tx.execute_batch(schema::V1)?;
+        let found = schema_version(&tx)?;
+        if found < SCHEMA_VERSION {
+            for (version, step) in [(1, schema::V1), (2, schema::V2)] {
+                if found < version {
+                    tx.execute_batch(step)?;
+                }
+            }
             tx.execute(
-                "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
+                "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 [SCHEMA_VERSION.to_string()],
             )?;
         }
