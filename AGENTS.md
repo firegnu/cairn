@@ -22,6 +22,8 @@ cairn 是给终端里 coding agent 用的工作接续记忆工具：新会话开
   - 用户真实的 cairn 数据库。
 
   hook 代码不保存 `prompt` 和 `last_assistant_message`，也不读 `transcript_path`。测试只用合成材料、临时 Git 仓库和隔离目录（临时 `HOME` / `XDG_STATE_HOME`）。
+
+  本仓库自己采用 cairn 属于正常使用，不在上面“不读真实数据库”之内：通过 cairn 的 hook 和命令读写**本项目**的记录可以。除此之外照旧：不直接打开数据库文件，不看别的项目的记录；排查 cairn 的问题在隔离目录用合成输入复现，不拿真实数据库试。
 - **不改用户真实配置**：开发期间不写 `~/.claude/settings.json`、`~/.codex/hooks.json`、`~/.codex/config.toml`。实测时只用会话级参数注入（Claude 用 `--settings`，Codex 用 `-c hooks.*`），或者临时目录里的项目级配置。真实的 `cairn install` 必须等用户明确同意后才执行。需要用户点信任对话框时，先告诉用户，并说明之后怎么清除。
 - **不要干扰用户正在用的 agent**：`corral ls` 里现有的 agent 都是用户的。可以用 `corral ls/status/reply` 读它们；不要对它们执行 `corral stop`、`corral send`、`corral keys`，也不要 attach 上去打字。主控按分派流程开出来的 `cairn/dev-*`、`cairn/test-*` 是自己的，照流程送话、关闭。需要真实 agent 做实测时，自己开一个 `cairn/test-<名字>`，用完立刻 `corral stop`。
 - **不按名字批量杀进程**：不要用 `pkill -f cairn`、`pkill -f corral` 这类命令，主控和其他 agent 的命令行里都带着项目名和工作目录。停自己起的进程，用启动时记下的 PID。
