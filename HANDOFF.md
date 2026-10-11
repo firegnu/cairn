@@ -11,10 +11,15 @@
 - AGENTS.md“隐私”一条末尾加了一段（`e0d3949`，用户看过措辞后同意，已推送）：本仓库自己采用 cairn 属于正常使用，通过 cairn 的 hook 和命令读写本项目的记录可以；不直接打开数据库文件、不看别的项目的记录、排查问题仍在隔离目录用合成输入复现，这三样照旧。
 - **本仓库已采用 cairn**（用户 10-11 自己执行）。`cairn status` 核对：项目已采用；Claude 的 UserPromptSubmit 在采用后的第一条消息就记上了时间（08:56Z）；Codex 在本项目还没有触发记录。
 
+- **本仓库存下了第一条记录**（`01M4N2X9ZYM5P9RZBPSPPGX7TC`，来源是本次会话）。主控没拿到来源 ID 所以没主动存，是回合结束时 Stop hook 要求续跑、给出 ID 后存的；之后每个回合都照约定确认。核对到的：
+  - `cairn list` 里有这条，状态“可见”；用户在 paddock 的 Cairn 面板里也看到了。
+  - `cairn show` 渲染出来的内容对：记录五节完整；之后存的几次“无新内容”确认没有顶替它；现场对比（HEAD 多 0 个提交、与 origin/main 持平、工作区干净）和实际相符。
+  - `cairn status`：Claude 的 UserPromptSubmit、Stop 在本项目都有时间；SessionStart、SessionEnd 还没有。
+
 **没做完、要跟进的**
 
-- 本仓库的开局注入还没见过：采用是在会话中途做的，SessionStart 要到下一次新会话才触发。**下一次新会话先看注入的内容准不准**，和本文件对照。
-- 采用时没有任何记录，第一次注入能看到什么，取决于本次会话有没有存下记录。
+- **真正的开局注入还没验**：采用是在会话中途做的，SessionStart 要到新会话才触发。`cairn show` 只证明渲染的内容对，证明不了 SessionStart 触发了、内容送到了模型面前。用户说接下来开新会话看注入；**新会话开局先把注入的内容和本文件对照**，结果记进这里。
+- 新会话开起来后，`cairn status` 里 Claude 的 SessionStart 应该有时间；本次会话结束后 SessionEnd 也应该有（paddock 里一直没见到 Claude 的 SessionEnd）。
 
 **拿的主意**
 
