@@ -80,3 +80,22 @@
 ## 做完
 
 在本文件末尾追加「## 完成记录」（在你的分支里提交）：做了什么、验证了什么、拿主意的地方、没做的事，各几句话。回复里只写这几样，加上有没有要主控决定的事。命令都在前台跑完，全部做完后，回复最后一行写 DONE。
+
+## 完成记录
+
+2026-10-11，cairn/dev-memory-survey 完成。
+
+- **做了什么**：新增 `docs/调研/agent记忆系统现状.md`，按长期记忆、RSI、跨 agent 共享组织。覆盖 Claude Code、Codex、Gemini CLI，以及 Engram、beads、Claude-Mem、Mem0/OpenMemory、Graphiti/Zep、Letta/Letta Code；补充论文、厂商工程文章、近期发行与尚未解决的分歧。事实附直接链接和查阅日期，区分原文、判断、未知及摘要阅读范围。
+- **验证了什么**：文档改动以 `git diff --check` 检查空白错误，新文件暂存后再用 `git diff --cached --check` 覆盖。报告完成后重新打开以下五个链接，与对应表述核对，均相符：
+
+  | 抽查链接 | 核对内容 |
+  | --- | --- |
+  | [Codex Memories](https://learn.chatgpt.com/docs/customization/memories) | 空闲旧会话后台提炼、本地文件、逐聊天控制。 |
+  | [beads v1.3.1](https://github.com/gastownhall/beads/releases/tag/v1.3.1) | proxied-server 默认拓扑的版本表述与并发 blocker 修复。 |
+  | [Engram DOCS](https://github.com/Gentleman-Programming/engram/blob/main/DOCS.md) | topic 更新、纠错、生命周期复查和冲突标注。 |
+  | [Mem0 新算法迁移](https://docs.mem0.ai/migration/oss-v2-to-v3) | ADD-only、混合检索、图记忆从 OSS 移至 Platform。 |
+  | [ACE 作者摘要](https://arxiv.org/abs/2510.04618) | 增量演化 playbook、context collapse、2026 年修订与 ICLR 标注。 |
+
+- **拿主意的地方**：优先深读少量代表项目；不以星数、厂商成绩或可接入说明充当本轮实测。保留 beads README 与发行版的默认拓扑差异，区分 Mem0 OSS／云端和 Letta 当前／旧 SDK。RSI 分成经验／上下文适应与递归修改自身能力，不替用户确认术语含义。
+- **没做的事**：未出 cairn 设计方案，未改功能代码、DESIGN 或其他已有文档；未安装、试跑调研对象，未启动其他 agent，未读取真实会话或 cairn 数据库，未修改用户配置；未合并、推送。纯文档任务不编造 RED 测试，不运行 Rust 测试或扩大验证。
+- **需主控决定**：本调研无阻塞项。后续仍需与用户确认 RSI 的具体层次、共享涉及的工具／项目／agent／机器／人员范围；这些不是本报告新增的验收条件。只在 `p1-02-memory-survey` 提交，命令均前台执行并等待结束。
