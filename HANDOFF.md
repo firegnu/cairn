@@ -1,8 +1,27 @@
 # 交接
 
-2026-10-10，由 cairn/main（主控，Claude Code）更新。同日更早 paddock/main 按用户的话直接在本仓库做了 F2 并改过本文件，那部分留在“同日更早”一节。
+2026-10-11，由 cairn/main（主控，Claude Code）更新。10-10 更早 paddock/main 按用户的话直接在本仓库做了 F2 并改过本文件，那部分留在“10-10 更早”一节。
 
-## 本次会话（10-10，cairn/main）
+## 本次会话（10-11，cairn/main）
+
+**摘要**：用户提出让 cairn 仓库自己也用 cairn（自举）。先改了 AGENTS.md 的隐私一条，随后用户自己执行了 `cairn adopt`。没有动代码。
+
+**完成的**
+
+- AGENTS.md“隐私”一条末尾加了一段（`e0d3949`，用户看过措辞后同意，已推送）：本仓库自己采用 cairn 属于正常使用，通过 cairn 的 hook 和命令读写本项目的记录可以；不直接打开数据库文件、不看别的项目的记录、排查问题仍在隔离目录用合成输入复现，这三样照旧。
+- **本仓库已采用 cairn**（用户 10-11 自己执行）。`cairn status` 核对：项目已采用；Claude 的 UserPromptSubmit 在采用后的第一条消息就记上了时间（08:56Z）；Codex 在本项目还没有触发记录。
+
+**没做完、要跟进的**
+
+- 本仓库的开局注入还没见过：采用是在会话中途做的，SessionStart 要到下一次新会话才触发。**下一次新会话先看注入的内容准不准**，和本文件对照。
+- 采用时没有任何记录，第一次注入能看到什么，取决于本次会话有没有存下记录。
+
+**拿的主意**
+
+- 和 paddock 一样，先跟全量 `HANDOFF.md` 并存：并存期间本文件仍是权威，cairn 的记录只作对照；本文件瘦不瘦由用户定。
+- 采用的代价当时跟用户讲过：本仓库少了“没采用所以误跑会被忽略或拒收”这层保护（所有 worktree 都算已采用，派出去的 agent 靠 `CAIRN_DISABLE=1`、测试靠隔离目录）；主控每个回合多一次保存或确认，开销没量过；主控了解 cairn 内部，表现不能代表一般 agent。
+
+## 上次会话（10-10，cairn/main）
 
 **摘要**：接手时交接还停在 10-07（“先别安装”），实际试点已经在跑；重读交接和 F2 改的设计后对齐了现状。随后按 paddock/main 转来、用户同意的需求做了 F3（`list --json` 和单条记录的公开约定，0.3.0），装到真实环境并通知了 paddock/main。
 
@@ -42,7 +61,7 @@
 - `README.md`、`README.zh-CN.md`、`AGENTS.md`（`CLAUDE.md` 是指向它的软链接）。
 - 需求原文（paddock 仓库，只读）：`../paddock/docs/任务/P5-79-Cairn标签改成记录列表.md` 的「cairn 给的东西」一节。
 
-## 同日更早（10-10，paddock/main 在本仓库做的 F2）
+## 10-10 更早（paddock/main 在本仓库做的 F2）
 
 - 起因：paddock 的 Cairn 面板（paddock P5-55）只知道 hook 装没装，分不出“装了但没触发”；它调用的三条命令的输出也没写成约定。用户先让 paddock/main 把这两项需求用 `corral send` 交给 cairn/main；cairn/main 分析后给了 A（按项目，要升表结构）、B（按 agent 全局）两条路并用提问对话框等用户选。用户取消了那次提问，改口：“我取消了，我觉得你直接再cairn中干吧，之后更新他的handoff文件，以便下次能够正确识别最新的情况。另外我觉得问题不要最小化操作。就是一次解决。之前cairn中的数据我认为不重要。”所以这件活没有经 cairn/main 派发，AGENTS.md 的“主控不自己写功能代码”这一次照用户的话没有执行。
 - 做了 **F2**（任务书和完成记录：`docs/tasks/F2-hook最近触发与公开约定.md`；交叉审查三轮到“可以合并”：`docs/tasks/F2-hook最近触发与公开约定-交叉审查.md`）：
@@ -60,7 +79,7 @@
 - **试点已经在跑**（不是“等用户点头”）：
   - Claude Code 的 hook 10-08 装了（`~/.claude/settings.json`：4 个 hook 加一条放行稳定路径 `cairn save` 的规则）。
   - Codex 的 hook 10-10 装了（用户：“给codex也装上吧”，paddock/main 执行；`~/.codex/hooks.json` 4 处，改前备份 `~/.codex/hooks.json.bak-20261010T071731…`）。直接启动的 Codex 要用户到 `/hooks` 里信任，10-10 20:33 看 paddock 里的 `last_seen`，Codex 四种事件都已有时间（17:43–17:48），触发过了。
-  - 已采用的项目：owlet、paddock（paddock 10-10 起，和它的全量 HANDOFF 并存试一两周，10-24 前后用户回看）。owlet 的 HANDOFF 已减到只留稳定背景，进度靠 cairn 的记录，所以**真实数据库不能随手清**。
+  - 已采用的项目：owlet、paddock（paddock 10-10 起，和它的全量 HANDOFF 并存试一两周，10-24 前后用户回看）、cairn 自己（10-11 起，同样和本文件并存）。owlet 的 HANDOFF 已减到只留稳定背景，进度靠 cairn 的记录，所以**真实数据库不能随手清**。
   - ranch（corral／派活技能）派出去的 agent 一律带 `CAIRN_DISABLE=1`（ranch R2），cairn 只留给用户直接对话的主控。
 - **paddock 已经在用 cairn**：右侧栏第四个标签 Cairn（paddock P5-55，已合并安装）调用 `cairn status --json`、`cairn show --json`、`cairn adopt` 三条，面板开着时每 5 秒读一次（`show` 会顺手收取暂存区）。paddock 的 P5-78 要在面板上显示 `last_seen`；P5-79 要把正文改成记录列表、点开看单条，用 0.3.0 的 `cairn list --json` 和 `cairn show <ID> --json`（都由 paddock 主控做，进度看 paddock 的 HANDOFF）。
 - **真实环境装的是 0.3.0**（main 也是 0.3.0），数据库表结构版本 2。
@@ -76,7 +95,7 @@
 
 ## 下一步
 
-1. **看试点**（用户定：直接用 paddock 试）：在已采用的项目里跑 `cairn status`，看每家“本项目最近触发”那一行（或 `--json` 的 `last_seen`）。10-10 20:33 在 paddock 里看到：Claude 的 SessionStart、UserPromptSubmit、Stop 都有时间，SessionEnd 还没有；Codex 四种事件都有时间（17:43–17:48），说明 Codex 的 hook 在 paddock 里触发过。还没看的：重开后注入的内容准不准。10-24 前后用户回看 paddock 的试点（HANDOFF 瘦不瘦由用户定）。
+1. **看试点**（用户定：直接用 paddock 试；10-11 起本仓库自己也采用了，新会话开局先看这里的注入准不准）：在已采用的项目里跑 `cairn status`，看每家“本项目最近触发”那一行（或 `--json` 的 `last_seen`）。10-10 20:33 在 paddock 里看到：Claude 的 SessionStart、UserPromptSubmit、Stop 都有时间，SessionEnd 还没有；Codex 四种事件都有时间（17:43–17:48），说明 Codex 的 hook 在 paddock 里触发过。还没看的：重开后注入的内容准不准。10-24 前后用户回看 paddock 的试点（HANDOFF 瘦不瘦由用户定）。
 2. **paddock 还想要、没做的**（见 `docs/调研/与paddock结合.md`，开不开工由用户定）：`show --json`（不带 ID）分节。做的时候按 §7.1 的“只加不改”来，新字段写进 §7.1。
 
 ## 悬而未决
