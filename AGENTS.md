@@ -36,7 +36,7 @@ cairn 是给终端里 coding agent 用的工作接续记忆工具：新会话开
 - 这个项目的开发任务由主控拆开，派给别的 agent 做。主控负责拆任务、写任务文件、审查、合并，不自己写功能代码。分派时按 corral-dispatch 技能做。
 - 被委派的 agent（任务文件里写明了身份）照任务文件做，不再往下派。
 - 需求单只写用户要的结果；验收照抄用户原话，不补验收点。主控觉得该加的，列出来问用户。`docs/实施计划.md` 里的"建议验证"是设计方的检查思路，不是用户的验收条件。
-- agent 名字以 `cairn/dev-` 开头；任务文件放 `docs/tasks/`；每个任务一个分支，worktree 放 `../cairn-worktrees/<分支>`，交叉审查用 detached worktree `../cairn-worktrees/review-<分支>`。
+- agent 名字以 `cairn/dev-` 开头；任务文件从 P1-01（2026-10-11）起放 `docs/任务/`，和看板一致，之前的留在 `docs/tasks/` 不搬；每个任务一个分支，worktree 放 `../cairn-worktrees/<分支>`，交叉审查用 detached worktree `../cairn-worktrees/review-<分支>`。
 - 创建派发的 agent 时，在 `corral start` 参数里注明职责：实现者加 `--label role=implementer`，独立审查者加 `--label role=reviewer`，实测用的 agent 加 `--label role=test`。标签只用于显示，不改变职责分工或权限。
 - 审查：主控审查每个任务。
 - 合并：审查通过后，本地合并进 main，再推送到 origin（`github.com/firegnu/cairn`，公开仓库）。主控不自行创建远程仓库。
