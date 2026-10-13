@@ -21,7 +21,7 @@ cairn 是给终端里 coding agent 用的工作接续记忆工具：新会话开
   - 各工具自带的记忆文件；
   - 用户真实的 cairn 数据库。
 
-  hook 代码不保存 `prompt` 和 `last_assistant_message`，也不读 `transcript_path`。测试只用合成材料、临时 Git 仓库和隔离目录（临时 `HOME` / `XDG_STATE_HOME`）。
+  hook 代码不保存 `prompt` 和 `last_assistant_message`。产品为写摘要会读 `transcript_path` 指的那一个会话记录文件（`docs/DESIGN.md` §8.8、§12，2026-10-13 起）；这不改变上面开发和测试的规矩：写这部分代码、测这部分代码，仍然不读本机真实的会话记录。测试只用合成材料、临时 Git 仓库和隔离目录（临时 `HOME` / `XDG_STATE_HOME`），会话记录用合成的夹具，旁路模型用假的 `codex` 可执行文件顶替。
 
   本仓库自己采用 cairn 属于正常使用，不在上面“不读真实数据库”之内：通过 cairn 的 hook 和命令读写**本项目**的记录可以。除此之外照旧：不直接打开数据库文件，不看别的项目的记录；排查 cairn 的问题在隔离目录用合成输入复现，不拿真实数据库试。
 - **不改用户真实配置**：开发期间不写 `~/.claude/settings.json`、`~/.codex/hooks.json`、`~/.codex/config.toml`。实测时只用会话级参数注入（Claude 用 `--settings`，Codex 用 `-c hooks.*`），或者临时目录里的项目级配置。真实的 `cairn install` 必须等用户明确同意后才执行。需要用户点信任对话框时，先告诉用户，并说明之后怎么清除。
