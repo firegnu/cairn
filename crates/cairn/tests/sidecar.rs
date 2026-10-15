@@ -1272,7 +1272,15 @@ fn simultaneous_ledger_writers_retry_once_and_record_a_second_version_conflict()
         f.ok(&["adopt"], "");
         for sid in ["a", "b"] {
             f.session(sid, &format!("session-{sid}"));
-            f.hook(sid, "SessionEnd");
+            // Seed the trigger directly: this test exercises ledger concurrency,
+            // not the SessionEnd hook's 100 ms Git deadline.
+            f.store()
+                .connection()
+                .execute(
+                    "INSERT INTO events(source_id,kind,at) VALUES (?1,'session_ended',?2)",
+                    rusqlite::params![format!("claude:{sid}"), cairn::save::now()],
+                )
+                .unwrap();
         }
         f.fake_ledger(
             "NOTHING_TO_CONTINUE",
@@ -1312,7 +1320,13 @@ exit 0
                 .write_all(dialogue("session-b again").as_bytes())
                 .unwrap();
             f.hook("b", "UserPromptSubmit");
-            f.hook("b", "SessionEnd");
+            f.store()
+                .connection()
+                .execute(
+                    "INSERT INTO events(source_id,kind,at) VALUES ('claude:b','session_ended',?1)",
+                    [cairn::save::now()],
+                )
+                .unwrap();
             let mut b = f.waiter("b");
             f.ready("b-2-ready");
             f.release("b-2-release");
@@ -1418,7 +1432,15 @@ fn new_turn_resets_ledger_failure_limit_and_waiter_records_again() {
         .query_row("SELECT ledger_failures FROM sessions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(failures, 0);
-    f.hook("one", "SessionEnd");
+    // Keep the real turn-start reset above, but seed the waiter trigger without
+    // depending on the SessionEnd hook's 100 ms Git deadline.
+    f.store()
+        .connection()
+        .execute(
+            "INSERT INTO events(source_id,kind,at) VALUES ('claude:one','session_ended',?1)",
+            [cairn::save::now()],
+        )
+        .unwrap();
     f.fake_ledger(
         "NOTHING_TO_CONTINUE",
         "ADD state | next turn | | new decision",
