@@ -80,6 +80,23 @@ impl Fixture {
     }
 
     fn hook_as(&self, agent: &str, sid: &str, event: &str) {
+        // These tests drive the foreground summarize command. Hold leases while
+        // seeding hook metadata so automatic workers cannot race that command.
+        let mut store = self.store();
+        let sources: Vec<String> = store
+            .connection()
+            .prepare("SELECT source_id FROM sessions")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let leases: Vec<_> = sources
+            .iter()
+            .filter_map(|source| {
+                cairn::sidecar::Lease::acquire(&mut store, source, chrono::Utc::now()).unwrap()
+            })
+            .collect();
         self.ok(
             &["hook", agent],
             &serde_json::json!({
@@ -88,6 +105,9 @@ impl Fixture {
             })
             .to_string(),
         );
+        for lease in leases {
+            lease.release(store.connection()).unwrap();
+        }
     }
 
     fn session(&self, sid: &str, text: &str) {

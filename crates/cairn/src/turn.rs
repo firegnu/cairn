@@ -100,6 +100,37 @@ pub fn turn_started(context: Context<'_>, turn_key: Option<&str>) -> Report {
     })())
 }
 
+pub(crate) fn supplement(context: Context<'_>, command: &str) -> crate::cli::Result<String> {
+    let Some(mut store) = active_store(context)? else {
+        return Ok(String::new());
+    };
+    let tx = store.transaction(TransactionBehavior::Immediate)?;
+    if !adopted(&tx, context)? {
+        return Ok(String::new());
+    }
+    let source = source_id(context);
+    let rendered = crate::render::supplement(
+        &tx,
+        &crate::render::Request {
+            scope: context.scope,
+            source_id: &source,
+            command,
+            now: chrono::DateTime::parse_from_rfc3339(context.at)?.with_timezone(&chrono::Utc),
+            incremental: true,
+            budget: crate::render::CHARACTER_BUDGET,
+        },
+    )?;
+    for id in &rendered.record_ids {
+        tx.execute(
+            "INSERT INTO injections(source_id,record_id,injected_at) VALUES (?1,?2,?3)
+            ON CONFLICT(source_id,record_id) DO NOTHING",
+            params![source, id, context.at],
+        )?;
+    }
+    tx.commit()?;
+    Ok(rendered.text)
+}
+
 /// Collect voluntary saves, then persist session metadata even if collection or
 /// Git facts fail. No confirmation window or continuation decision is consulted.
 pub fn turn_ended(context: Context<'_>) -> Report {

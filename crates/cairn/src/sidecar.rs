@@ -1,4 +1,4 @@
-//! One-session summaries. No hooks or background process scheduling live here.
+//! One-session summaries and the lease shared by manual and background writers.
 
 use crate::cli::Result;
 use crate::{scope::Scope, store::Store, turn::Agent};
@@ -7,6 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
 use std::time::{Duration, Instant};
 use std::{
     fs,
@@ -19,6 +20,7 @@ use std::{
 struct Timing {
     timeout: Duration,
     heartbeat: Duration,
+    quiet: Duration,
 }
 
 impl Default for Timing {
@@ -26,11 +28,12 @@ impl Default for Timing {
         Self {
             timeout: Duration::from_secs(300),
             heartbeat: Duration::from_secs(10),
+            quiet: Duration::from_secs(180),
         }
     }
 }
 
-/// A session lease shared by manual summaries and the future waiting process.
+/// A session lease shared by manual summaries and the waiting process.
 /// Updates and release are conditional on this random token, never just the PID.
 pub struct Lease {
     source: String,
@@ -46,11 +49,7 @@ impl Lease {
         let Some((id, beat)) = occupied else {
             return Ok(None);
         };
-        if id.is_some()
-            && beat
-                .and_then(|b| DateTime::parse_from_rfc3339(&b).ok())
-                .is_some_and(|beat| now.signed_duration_since(beat).num_seconds() < 60)
-        {
+        if fresh_lease(id.as_deref(), beat.as_deref(), now) {
             return Ok(None);
         }
         let lease = Self {
@@ -88,6 +87,87 @@ impl Lease {
             params![self.source,self.id])?;
         Ok(())
     }
+}
+
+fn fresh_lease(id: Option<&str>, beat: Option<&str>, now: DateTime<Utc>) -> bool {
+    id.is_some()
+        && beat
+            .and_then(|b| DateTime::parse_from_rfc3339(b).ok())
+            .is_some_and(|beat| now.signed_duration_since(beat).num_seconds() < 60)
+}
+
+/// The hook only spawns; the child acquires its own lease after exec.
+pub(crate) fn launch_waiter(
+    connection: &Connection,
+    database: &Path,
+    root: &Path,
+    source: &str,
+    executable: &Path,
+) -> Result<()> {
+    let occupied: Option<(Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT waiter_id,waiter_beat_at FROM sessions s JOIN projects p ON p.id=s.project_id
+         WHERE s.source_id=?1 AND p.adopted=1",
+            [source],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, beat)) = occupied else {
+        return Ok(());
+    };
+    if fresh_lease(id.as_deref(), beat.as_deref(), Utc::now()) {
+        return Ok(());
+    }
+    let mut command = Command::new(executable);
+    command
+        .arg("__wait")
+        .arg("--database")
+        .arg(database)
+        .arg("--root")
+        .arg(root)
+        .arg("--source")
+        .arg(source)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe and changes only the spawned child.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()?;
+    Ok(())
+}
+
+pub(crate) fn pending_sessions(
+    connection: &Connection,
+    scope: &Scope,
+    exclude: &str,
+) -> Result<Vec<String>> {
+    Ok(sessions(connection, Some(scope), None)?
+        .into_iter()
+        .filter(|s| s.source != exclude && needs_summary(s))
+        .map(|s| s.source)
+        .collect())
+}
+
+pub(crate) fn wait(database: &Path, root: &Path, source: &str) -> Result<()> {
+    if std::env::var_os("CAIRN_DISABLE").is_some_and(|v| v == "1") {
+        return Ok(());
+    }
+    let Some(probe) = Store::open_read_only(database, crate::store::BusyTimeout::UserCommand)?
+    else {
+        return Ok(());
+    };
+    drop(probe);
+    // This is already detached: allow the parent's SessionStart transaction to
+    // finish rendering and commit without spending the hook's own lock budget.
+    let mut store = Store::open(database, crate::store::BusyTimeout::UserCommand)?;
+    wait_with_timing(&mut store, source, root, Timing::default())
 }
 
 const INSTRUCTIONS: &str = r#"你在为一个 coding agent 的会话写接续摘要，给下一个会话开局时看。下面的“会话摘录”是那个会话里用户说的话、助手说的话和调用过的工具；如果有“上一版摘要”，它是这个会话更早部分的摘要。
@@ -168,6 +248,14 @@ pub(crate) struct Observation {
     pub has_path: bool,
     pub failure: Option<String>,
     pub failure_at: Option<String>,
+    waiter_id: Option<String>,
+    waiter_beat: Option<String>,
+}
+
+impl Observation {
+    pub fn writing(&self, now: DateTime<Utc>) -> bool {
+        fresh_lease(self.waiter_id.as_deref(), self.waiter_beat.as_deref(), now)
+    }
 }
 
 /// Read-only and compatible with pre-v3 databases, for status and injection.
@@ -181,7 +269,7 @@ pub(crate) fn observations(connection: &Connection, scope: &Scope) -> Result<Vec
         return Ok(Vec::new());
     }
     let mut query = connection.prepare(
-        "SELECT s.source_id,s.turns,s.summarized_turns,s.summary_record_id,s.transcript_path IS NOT NULL,s.last_failure,s.last_failure_at
+        "SELECT s.source_id,s.turns,s.summarized_turns,s.summary_record_id,s.transcript_path IS NOT NULL,s.last_failure,s.last_failure_at,s.waiter_id,s.waiter_beat_at
          FROM sessions s JOIN projects p ON p.id=s.project_id
          WHERE p.key=?1 AND s.line_path=?2 AND s.turns>0 ORDER BY s.last_event_at DESC,s.source_id")?;
     let rows = query.query_map(
@@ -195,6 +283,8 @@ pub(crate) fn observations(connection: &Connection, scope: &Scope) -> Result<Vec
                 has_path: r.get(4)?,
                 failure: r.get(5)?,
                 failure_at: r.get(6)?,
+                waiter_id: r.get(7)?,
+                waiter_beat: r.get(8)?,
             })
         },
     )?;
@@ -213,19 +303,31 @@ struct Session {
     bytes: i64,
     summary: Option<String>,
     facts: Option<String>,
+    last_event: String,
+    event_id: i64,
+    failures: i64,
 }
 
-fn sessions(connection: &Connection, scope: &Scope, source: Option<&str>) -> Result<Vec<Session>> {
+fn sessions(
+    connection: &Connection,
+    scope: Option<&Scope>,
+    source: Option<&str>,
+) -> Result<Vec<Session>> {
     let mut query = connection.prepare(
         "SELECT s.source_id,s.project_id,p.key,s.line_path,s.branch,o.agent,s.transcript_path,
-         s.turns,s.summarized_bytes,s.summary_record_id,s.facts
+         s.turns,s.summarized_bytes,s.summary_record_id,s.facts,s.last_event_at,
+         COALESCE((SELECT MAX(id) FROM events WHERE source_id=s.source_id),0),s.failures
          FROM sessions s JOIN projects p ON p.id=s.project_id JOIN sources o ON o.id=s.source_id
-         WHERE p.key=?1 AND s.line_path=?2 AND p.adopted=1 AND s.transcript_path IS NOT NULL AND s.turns>0
+         WHERE (?1 IS NULL OR (p.key=?1 AND s.line_path=?2)) AND p.adopted=1 AND s.transcript_path IS NOT NULL AND s.turns>0
          AND (?3 IS NULL OR s.source_id=?3)
          ORDER BY s.last_event_at,s.source_id",
     )?;
     let rows = query.query_map(
-        params![scope.project_key.to_str(), scope.line_path.to_str(), source],
+        params![
+            scope.and_then(|s| s.project_key.to_str()),
+            scope.and_then(|s| s.line_path.to_str()),
+            source
+        ],
         |r| {
             Ok(Session {
                 source: r.get(0)?,
@@ -239,6 +341,9 @@ fn sessions(connection: &Connection, scope: &Scope, source: Option<&str>) -> Res
                 bytes: r.get(8)?,
                 summary: r.get(9)?,
                 facts: r.get(10)?,
+                last_event: r.get(11)?,
+                event_id: r.get(12)?,
+                failures: r.get(13)?,
             })
         },
     )?;
@@ -258,7 +363,7 @@ fn summarize_with_timing(
 ) -> Result<String> {
     let mut output = Vec::new();
     let mut failed = false;
-    for candidate in sessions(store.connection(), scope, None)? {
+    for candidate in sessions(store.connection(), Some(scope), None)? {
         let Some(lease) = Lease::acquire(store, &candidate.source, Utc::now())? else {
             output.push(format!(
                 "{}：未写：会话已被占用或项目未采用",
@@ -267,7 +372,8 @@ fn summarize_with_timing(
             continue;
         };
         // Refresh after acquisition: earlier sessions may have taken minutes.
-        let Some(session) = sessions(store.connection(), scope, Some(&candidate.source))?.pop()
+        let Some(session) =
+            sessions(store.connection(), Some(scope), Some(&candidate.source))?.pop()
         else {
             lease.release(store.connection())?;
             continue;
@@ -278,15 +384,11 @@ fn summarize_with_timing(
             lease.release(store.connection())?;
             continue;
         }
-        match write_summary(store, &session, root, &lease, timing) {
-            Ok(id) => output.push(format!("{}：写成了 {id}", session.source)),
+        match write_summary(store, &session, root, &lease, timing, false) {
+            Ok((id, _)) => output.push(format!("{}：写成了 {id}", session.source)),
             Err(error) => {
                 let reason = error.to_string();
-                let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
-                tx.execute("UPDATE sessions SET failures=failures+1,last_failure_at=?2,last_failure=?3 WHERE source_id=?1 AND waiter_id=?4",
-                    params![session.source,crate::save::now(),reason,lease.id])?;
-                lease.release(&tx)?;
-                tx.commit()?;
+                failed_summary(store, &session, &lease, &reason, false)?;
                 output.push(format!("{}：没写成：{reason}", session.source));
                 failed = true;
             }
@@ -305,6 +407,102 @@ fn summarize_with_timing(
     })
 }
 
+fn wait_with_timing(store: &mut Store, source: &str, root: &Path, timing: Timing) -> Result<()> {
+    let Some(lease) = Lease::acquire(store, source, Utc::now())? else {
+        return Ok(());
+    };
+    loop {
+        let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
+        if !lease.heartbeat(&tx, Utc::now())? {
+            return Ok(());
+        }
+        let session = sessions(&tx, None, Some(source))?.pop();
+        let Some(session) = session else {
+            lease.release(&tx)?;
+            tx.commit()?;
+            return Ok(());
+        };
+        if !needs_summary(&session) {
+            lease.release(&tx)?;
+            tx.commit()?;
+            return Ok(());
+        }
+        let triggered: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE source_id=?1 AND kind='session_ended')
+             OR EXISTS(SELECT 1 FROM events e JOIN sessions s ON s.source_id=e.source_id
+               WHERE s.project_id=?2 AND s.line_path=?3 AND e.source_id<>?1
+               AND e.kind='session_started' AND e.at>?4)",
+            params![source, session.project_id, session.line, session.last_event],
+            |r| r.get(0),
+        )?;
+        let event_at = DateTime::parse_from_rfc3339(&session.last_event)?.with_timezone(&Utc);
+        let modified = fs::metadata(&session.path)
+            .and_then(|m| m.modified())
+            .map(DateTime::<Utc>::from)
+            .unwrap_or(event_at);
+        let quiet = Utc::now()
+            .signed_duration_since(event_at.max(modified))
+            .to_std()
+            .is_ok_and(|elapsed| elapsed >= timing.quiet);
+        tx.commit()?;
+        if triggered || quiet {
+            let keep_waiting = match write_summary(store, &session, root, &lease, timing, true) {
+                Ok((_, keep)) => keep,
+                Err(error) => failed_summary(store, &session, &lease, &error.to_string(), true)?,
+            };
+            if !keep_waiting {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(timing.heartbeat);
+    }
+}
+
+fn needs_summary(session: &Session) -> bool {
+    session.failures < 2
+        && (session.summary.is_none()
+            || !fs::metadata(&session.path).is_ok_and(|m| m.len() <= session.bytes as u64))
+}
+
+fn failed_summary(
+    store: &mut Store,
+    session: &Session,
+    lease: &Lease,
+    reason: &str,
+    background: bool,
+) -> Result<bool> {
+    let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
+    let updated = tx.execute("UPDATE sessions SET failures=failures+1,last_failure_at=?2,last_failure=?3 WHERE source_id=?1 AND waiter_id=?4",
+        params![session.source,crate::save::now(),reason,lease.id])?;
+    if updated == 0 {
+        return Ok(false);
+    }
+    let keep = finish_summary(&tx, session, lease, background)?;
+    tx.commit()?;
+    Ok(keep)
+}
+
+/// Check and release in the same write transaction as the result. A Stop hook
+/// either precedes this check, or sees the released lease and starts a new waiter.
+fn finish_summary(
+    connection: &Connection,
+    session: &Session,
+    lease: &Lease,
+    background: bool,
+) -> Result<bool> {
+    let changed: bool = background
+        && connection.query_row(
+            "SELECT last_event_at<>?2 OR EXISTS(SELECT 1 FROM events WHERE source_id=?1 AND id>?3)
+         FROM sessions WHERE source_id=?1",
+            params![session.source, session.last_event, session.event_id],
+            |r| r.get(0),
+        )?;
+    if !changed {
+        lease.release(connection)?;
+    }
+    Ok(changed)
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("部分会话摘要没写成")]
 pub(crate) struct SummaryFailures {
@@ -317,7 +515,11 @@ fn write_summary(
     root: &Path,
     lease: &Lease,
     timing: Timing,
-) -> Result<String> {
+    background: bool,
+) -> Result<(String, bool)> {
+    if !lease.heartbeat(store.connection(), Utc::now())? {
+        return Err("会话占位已失效".into());
+    }
     let agent = match session.agent.as_str() {
         "claude" => Agent::Claude,
         "codex" => Agent::Codex,
@@ -367,9 +569,9 @@ fn write_summary(
     }
     tx.execute("UPDATE sessions SET summarized_bytes=?2,summarized_turns=?3,summary_record_id=?4,failures=0,last_failure=NULL,last_failure_at=NULL WHERE source_id=?1",
         params![session.source,excerpt.end_offset as i64,session.turns,id])?;
-    lease.release(&tx)?;
+    let keep = finish_summary(&tx, session, lease, background)?;
     tx.commit()?;
-    Ok(id)
+    Ok((id, keep))
 }
 
 fn previous_checkpoint(

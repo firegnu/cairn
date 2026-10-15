@@ -2,7 +2,9 @@
 
 English | [简体中文](README.zh-CN.md)
 
-cairn is a work-continuation memory for coding agents running in the terminal. It records where the last session stopped, what has observably changed since, and the suggested next step, so that a new Claude Code or Codex session sees it right at the start. Every normally finished turn also gets one chance to save what the next session needs.
+cairn is a work-continuation memory for coding agents running in the terminal. It records where the last session stopped, what has observably changed since, and the suggested next step, so that a new Claude Code or Codex session sees the available summaries at the start. Summaries are written in the background after a session has been quiet for 3 minutes, ends, or another session starts on the same work line. Startup never waits for a summary; a late summary from a session already stopped at startup is injected at your next prompt.
+
+cairn reads the session transcript path supplied by the agent's hooks and uses your logged-in `codex exec` to summarize it, including Claude Code sessions. Install and log in to Codex to enable summaries. Transcript excerpts are sent to Codex; the raw transcript is not stored in cairn's database. The agent in your session no longer needs to save every turn or continue its response to save.
 
 cairn runs on its own and does not depend on Saddle, Corral or Drover. The first version supports Claude Code and Codex, and only takes effect in projects you explicitly adopt.
 
@@ -49,6 +51,8 @@ Only adopted projects receive and inject records; everything else is left alone.
 ## Everyday commands
 
 - `cairn show`: show what would be injected into the agent for the current work line.
+- `cairn summarize`: write or retry summaries for eligible sessions on the current work line, in the foreground. `show`, `list` and `status` never start summary generation.
+- `cairn config`: show summary settings. Use `cairn config sidecar.model <model>` or `cairn config sidecar.effort <effort>` to change them; the defaults are `gpt-5.6-luna` and `medium`.
 - `cairn list [--json]`: list the visible records of the current project (`--line` for the current work line).
 - `cairn show <ID>`: show one record in full.
 - `cairn correct <ID>`: append a correction to a record; the body is read from stdin.
@@ -58,7 +62,7 @@ Only adopted projects receive and inject records; everything else is left alone.
 - `cairn export`: export the current work line's records to stdout, or to a new file path.
 - `cairn status`: show agent installation, project adoption, spool status and when each agent's hooks last fired in this project.
 
-Agents save records by passing the body to `cairn save` on stdin, for example:
+`cairn save` remains available for voluntary notes or when you explicitly ask the agent to leave a record. Pass the body on stdin, for example:
 
 ```sh
 printf '%s\n' '## 停点' 'Finished one milestone.' | cairn save
@@ -70,7 +74,7 @@ The record body uses fixed Markdown section headings (DESIGN §6.3); `## 停点`
 
 The main database lives at `${XDG_STATE_HOME:-$HOME/.local/state}/cairn/cairn.db`. The agent's restricted save entry first writes to `cairn-spool/` in the user's private temporary directory, and hooks then ingest it into the database; `cairn status` reports the spool path and any files not yet ingested.
 
-Set `CAIRN_DISABLE=1` to temporarily disable the cairn hooks: they let the agent proceed, inject nothing, and do not save for that turn.
+Start a session with `CAIRN_DISABLE=1` to exclude it from cairn: its hooks inject nothing and record no events or transcript paths for automatic summaries.
 
 ## Uninstall and delete data
 

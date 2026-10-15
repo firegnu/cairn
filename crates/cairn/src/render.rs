@@ -191,7 +191,9 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
                 session.turns - session.summarized_turns
             ));
         }
-        if let Some(reason) = session.failure {
+        if session.writing(request.now) {
+            state.push_str("摘要正在写，写好后在下一次发话时补上。");
+        } else if let Some(reason) = session.failure {
             state.push_str(&format!(
                 "最近一次没写成：{reason}；可重试 `{} summarize`。",
                 request.command
@@ -303,73 +305,9 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
             }
             continue;
         }
-        let prefix = if already {
-            String::new()
-        } else {
-            format!(
-                "\n记录 {} · 来源 {} · {} · {} · {}（{}）\n",
-                record.id,
-                record.source,
-                if record.written_by == "sidecar" {
-                    "旁路模型"
-                } else {
-                    "cairn save"
-                },
-                record.branch.as_deref().unwrap_or("-"),
-                age(&record.at, request.now)?,
-                record.at
-            )
-        };
-        let mut suffix = String::new();
-        let mut ids = if already {
-            vec![]
-        } else {
-            vec![record.id.clone()]
-        };
-        if let Some(correction) = correction {
-            if already {
-                suffix.push_str(&format!("\n记录 {} 的", record.id));
-            }
-            suffix.push_str(&format!(
-                "更正 {} · 来源 {} · {}\n{}\n",
-                correction.id,
-                correction.source,
-                correction.at,
-                correction.body.as_deref().unwrap()
-            ));
-            ids.push(correction.id.clone());
-        }
-        suffix.push_str(&observed(connection, record)?);
-        let body = if already {
-            ""
-        } else {
-            record.body.as_deref().unwrap()
-        };
-        let full = if already {
-            suffix.clone()
-        } else {
-            format!("{prefix}{body}\n{suffix}")
-        };
-        let stop = if already {
-            suffix
-        } else {
-            format!("{prefix}## 停点\n{}\n{suffix}", stopping_point(body))
-        };
-        let reference = if already { correction.unwrap() } else { record };
-        entries.push([
-            Piece {
-                text: full,
-                ids: ids.clone(),
-            },
-            Piece { text: stop, ids },
-            Piece {
-                text: format!(
-                    "\n来源 {}；查看 `{} show {}`。\n",
-                    reference.source, request.command, reference.id
-                ),
-                ids: vec![],
-            },
-        ]);
+        entries.push(record_pieces(
+            connection, request, record, correction, already,
+        )?);
     }
     let mut folded = Vec::new();
     for record in all.iter().filter(|r| {
@@ -539,6 +477,162 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
             return Err("预算不足以容纳抬头、现场对比和查看提示".into());
         }
     }
+}
+
+/// Only summaries from sessions already stopped at this source's first start.
+/// The caller records the returned IDs in the same transaction as this read.
+pub(crate) fn supplement(connection: &Connection, request: &Request<'_>) -> Result<Rendered> {
+    let mut query = connection.prepare(
+        "SELECT s.source_id FROM sessions s JOIN projects p ON p.id=s.project_id
+         WHERE p.key=?1 AND s.line_path=?2 AND s.source_id<>?3
+         AND MAX(s.last_event_at,COALESCE((SELECT MAX(at) FROM events WHERE source_id=s.source_id),s.last_event_at))
+           < (SELECT MIN(at) FROM events WHERE source_id=?3 AND kind='session_started')",
+    )?;
+    let eligible = query
+        .query_map(
+            params![
+                request.scope.project_key.to_str(),
+                request.scope.line_path.to_str(),
+                request.source_id
+            ],
+            |r| r.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    let all = records(
+        connection,
+        request
+            .scope
+            .project_key
+            .to_str()
+            .ok_or("项目路径不是 UTF-8")?,
+    )?;
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for record in all.iter().filter(|r| {
+        r.visible() && r.kind == "checkpoint" && Path::new(&r.line) == request.scope.line_path
+    }) {
+        if !seen.insert(&record.source)
+            || record.written_by != "sidecar"
+            || !eligible.contains(&record.source)
+            || injected(connection, request.source_id, &record.id)?
+        {
+            continue;
+        }
+        entries.push(record_pieces(
+            connection,
+            request,
+            record,
+            latest_correction(&all, &record.id),
+            false,
+        )?);
+        if entries.len() == 3 {
+            break;
+        }
+    }
+    let mut levels = vec![0; entries.len()];
+    loop {
+        let mut rendered = Rendered {
+            text: String::new(),
+            record_ids: vec![],
+            omitted_sources: 0,
+        };
+        append_section(
+            &mut rendered,
+            "[cairn] 补上开局时还没写好的摘要：\n",
+            entries
+                .iter()
+                .zip(&levels)
+                .filter_map(|(variants, &level)| variants.get(level)),
+        );
+        if rendered.text.chars().count() <= request.budget {
+            return Ok(rendered);
+        }
+        if let Some(level) = levels.iter_mut().rev().find(|level| **level == 0) {
+            *level = 1;
+        } else if let Some(level) = levels.iter_mut().rev().find(|level| **level == 1) {
+            *level = 2;
+        } else if let Some(level) = levels.iter_mut().rev().find(|level| **level == 2) {
+            *level = 3;
+        } else {
+            return Err("预算不足以容纳补注入抬头".into());
+        }
+    }
+}
+
+fn record_pieces(
+    connection: &Connection,
+    request: &Request<'_>,
+    record: &Record,
+    correction: Option<&Record>,
+    already: bool,
+) -> Result<[Piece; 3]> {
+    let prefix = if already {
+        String::new()
+    } else {
+        format!(
+            "\n记录 {} · 来源 {} · {} · {} · {}（{}）\n",
+            record.id,
+            record.source,
+            if record.written_by == "sidecar" {
+                "旁路模型"
+            } else {
+                "cairn save"
+            },
+            record.branch.as_deref().unwrap_or("-"),
+            age(&record.at, request.now)?,
+            record.at
+        )
+    };
+    let mut suffix = String::new();
+    let mut ids = if already {
+        vec![]
+    } else {
+        vec![record.id.clone()]
+    };
+    if let Some(correction) = correction {
+        if already {
+            suffix.push_str(&format!("\n记录 {} 的", record.id));
+        }
+        suffix.push_str(&format!(
+            "更正 {} · 来源 {} · {}\n{}\n",
+            correction.id,
+            correction.source,
+            correction.at,
+            correction.body.as_deref().unwrap()
+        ));
+        ids.push(correction.id.clone());
+    }
+    suffix.push_str(&observed(connection, record)?);
+    let body = if already {
+        ""
+    } else {
+        record.body.as_deref().unwrap()
+    };
+    let full = if already {
+        suffix.clone()
+    } else {
+        format!("{prefix}{body}\n{suffix}")
+    };
+    let stop = if already {
+        suffix
+    } else {
+        format!("{prefix}## 停点\n{}\n{suffix}", stopping_point(body))
+    };
+    let reference = if already { correction.unwrap() } else { record };
+    Ok([
+        Piece {
+            text: full,
+            ids: ids.clone(),
+        },
+        Piece { text: stop, ids },
+        Piece {
+            text: format!(
+                "\n来源 {}；查看 `{} show {}`。\n",
+                reference.source, request.command, reference.id
+            ),
+            ids: vec![],
+        },
+    ])
 }
 
 struct Piece {
