@@ -127,6 +127,12 @@ pub(crate) fn supplement(context: Context<'_>, command: &str) -> crate::cli::Res
             params![source, id, context.at],
         )?;
     }
+    if let Some(version) = rendered.ledger_version {
+        tx.execute(
+            "UPDATE sessions SET ledger_injected_version=?2 WHERE source_id=?1",
+            params![source, version],
+        )?;
+    }
     tx.commit()?;
     Ok(rendered.text)
 }

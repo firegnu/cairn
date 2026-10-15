@@ -11,7 +11,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 
 mod schema;
 
-pub const SCHEMA_VERSION: u64 = 3;
+pub const SCHEMA_VERSION: u64 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -161,7 +161,12 @@ impl Store {
         let tx = self.transaction(TransactionBehavior::Immediate)?;
         let found = schema_version(&tx)?;
         if found < SCHEMA_VERSION {
-            for (version, step) in [(1, schema::V1), (2, schema::V2), (3, schema::V3)] {
+            for (version, step) in [
+                (1, schema::V1),
+                (2, schema::V2),
+                (3, schema::V3),
+                (4, schema::V4),
+            ] {
                 if found < version {
                     tx.execute_batch(step)?;
                 }
@@ -190,13 +195,18 @@ impl Store {
         if changed == 0 {
             return Ok(false);
         }
+        self.truncate_wal()?;
+        Ok(true)
+    }
+
+    pub(crate) fn truncate_wal(&self) -> Result<()> {
         let busy: i64 =
             self.connection
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
         if busy != 0 {
             return Err(Error::CheckpointBusy);
         }
-        Ok(true)
+        Ok(())
     }
 }
 

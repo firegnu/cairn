@@ -78,6 +78,14 @@ pub enum Command {
     },
     Adopt,
     Unadopt,
+    Ledger {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        command: Option<crate::ledger::Command>,
+    },
     Show {
         id: Option<String>,
         #[arg(long)]
@@ -231,6 +239,9 @@ pub fn run_at(
     let git = crate::scope::Git::default();
     let scope = git.resolve(cwd)?;
     match cli.command {
+        Command::Ledger { all, json, command } => {
+            crate::ledger::run(database, &scope, cwd, input, all, json, command)
+        }
         Command::Summarize => {
             if std::env::var("CAIRN_DISABLE").as_deref() == Ok("1") {
                 return Ok("CAIRN_DISABLE=1，未写摘要".into());

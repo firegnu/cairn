@@ -11,6 +11,356 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+fn ledger_json(f: &Fixture, args: &[&str]) -> Value {
+    serde_json::from_str(&f.run(args, "").unwrap()).unwrap()
+}
+
+#[test]
+fn ledger_commands_keep_history_restore_items_and_export_by_kind() {
+    let f = Fixture::new();
+    assert_eq!(
+        ledger_json(&f, &["ledger", "--json"]),
+        serde_json::json!({"version":0,"items":[]})
+    );
+    assert!(!f.db().exists());
+    assert!(f.run(&["ledger", "add", "open", "问题"], "").is_err());
+    assert!(!f.db().exists());
+    f.run(&["adopt"], "").unwrap();
+    f.run(&["ledger", "add", "open", "问题"], "待验证\n")
+        .unwrap();
+    f.run(&["ledger", "add", "state", "现状"], "").unwrap();
+    f.run(&["ledger", "add", "convention", "约定"], "合成约定")
+        .unwrap();
+    let list = ledger_json(&f, &["ledger", "--json"]);
+    assert_eq!(list["version"], 3);
+    assert_eq!(
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["no"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [2, 1, 3]
+    );
+    let item = &list["items"][1];
+    assert!(ulid::Ulid::from_string(item["id"].as_str().unwrap()).is_ok());
+    assert_eq!(item["kind"], "open");
+    assert_eq!(item["status"], "active");
+    assert_eq!(item["created_by"], "user");
+    assert_eq!(item["body"], "待验证\n");
+    assert_eq!(list["items"][0]["body"], Value::Null);
+    for field in ["created_at", "updated_at"] {
+        assert!(chrono::DateTime::parse_from_rfc3339(item[field].as_str().unwrap()).is_ok());
+    }
+    for field in ["closed_at", "close_reason", "deleted_at"] {
+        assert!(item[field].is_null());
+    }
+    f.run(
+        &["ledger", "edit", "#1", "--title", "修正的问题"],
+        "修正正文",
+    )
+    .unwrap();
+    f.run(&["ledger", "edit", "1", "--title", "再改标题"], "")
+        .unwrap();
+    f.run(&["ledger", "close", "1", "合成的了结理由"], "")
+        .unwrap();
+    assert_eq!(
+        ledger_json(&f, &["ledger", "--json"])["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let closed = ledger_json(&f, &["ledger", "show", "#1", "--json"]);
+    assert_eq!(
+        ledger_json(&f, &["ledger", "--all", "--json"])["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(!f.run(&["ledger"], "").unwrap().contains("再改标题"));
+    assert!(f
+        .run(&["ledger", "--all"], "")
+        .unwrap()
+        .contains("再改标题"));
+    assert!(!f
+        .run(&["ledger", "export"], "")
+        .unwrap()
+        .contains("修正正文"));
+    assert!(f
+        .run(&["ledger", "export", "--all"], "")
+        .unwrap()
+        .contains("修正正文"));
+    assert_eq!(closed["item"]["status"], "closed");
+    assert_eq!(closed["item"]["close_reason"], "合成的了结理由");
+    f.run(&["ledger", "reopen", "1"], "").unwrap();
+    let detail = ledger_json(
+        &f,
+        &["ledger", "show", item["id"].as_str().unwrap(), "--json"],
+    );
+    assert_eq!(detail["item"]["body"], "修正正文");
+    assert!(detail["item"]["closed_at"].is_null());
+    assert!(detail["item"]["close_reason"].is_null());
+    let changes = detail["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 5);
+    assert!(changes.iter().any(|c| c["action"] == "edit"
+        && c["before_title"] == "问题"
+        && c["before_body"] == "待验证\n"));
+    assert!(changes
+        .iter()
+        .any(|c| c["action"] == "close" && c["close_reason"] == "合成的了结理由"));
+    let detail_text = f.run(&["ledger", "show", "1"], "").unwrap();
+    assert!(detail_text.contains("历史") && detail_text.contains("待验证"));
+    let log = f.run(&["ledger", "log", "--limit", "2"], "").unwrap();
+    assert!(log.find("reopen").unwrap() < log.find("close").unwrap());
+    assert!(!log.contains("add"));
+    assert!(f
+        .run(&["ledger", "log", "--limit", "0"], "")
+        .unwrap()
+        .trim()
+        .is_empty());
+    let export = f.run(&["ledger", "export"], "").unwrap();
+    assert!(export.find("现状").unwrap() < export.find("悬而未决").unwrap());
+    assert!(export.find("悬而未决").unwrap() < export.find("约定").unwrap());
+    assert!(export.contains("修正正文"));
+    f.run(&["ledger", "export", "账.md"], "").unwrap();
+    assert!(fs::read_to_string(f.cwd().join("账.md"))
+        .unwrap()
+        .contains("修正正文"));
+    assert!(f.run(&["ledger", "export", "账.md"], "").is_err());
+    assert_eq!(ledger_json(&f, &["ledger", "--json"])["version"], 7);
+    f.run(&["unadopt"], "").unwrap();
+    assert_eq!(ledger_json(&f, &["ledger", "--json"])["version"], 7);
+    assert!(f
+        .run(&["ledger", "export", "--all"], "")
+        .unwrap()
+        .contains("修正正文"));
+    assert!(f
+        .run(&["ledger", "edit", "1", "--title", "不允许"], "")
+        .is_err());
+}
+
+#[test]
+fn ledger_delete_erases_all_versions_evidence_and_close_reasons() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    f.run(
+        &["ledger", "add", "open", "SYNTHETIC_PRIVATE_TITLE"],
+        "SYNTHETIC_PRIVATE_BODY",
+    )
+    .unwrap();
+    f.run(
+        &["ledger", "edit", "1", "--title", "replacement"],
+        "replacement body",
+    )
+    .unwrap();
+    f.run(&["ledger", "close", "1", "SYNTHETIC_PRIVATE_REASON"], "")
+        .unwrap();
+    f.run(&["ledger", "reopen", "1"], "").unwrap();
+    let store = f.store();
+    store
+        .connection()
+        .execute(
+            "UPDATE item_changes SET evidence='SYNTHETIC_PRIVATE_EVIDENCE' WHERE action='close'",
+            [],
+        )
+        .unwrap();
+    assert!(f.run(&["ledger", "delete", "1"], "").is_err());
+    f.run(&["ledger", "delete", "#1", "--yes"], "").unwrap();
+    let detail = ledger_json(&f, &["ledger", "show", "1", "--json"]);
+    assert_eq!(detail["item"]["title"], "（已删除）");
+    assert!(detail["item"]["body"].is_null());
+    assert!(detail["item"]["close_reason"].is_null());
+    assert!(detail["item"]["deleted_at"].is_string());
+    for change in detail["changes"].as_array().unwrap() {
+        for field in [
+            "before_title",
+            "before_body",
+            "evidence",
+            "close_reason",
+            "body",
+        ] {
+            assert!(change[field].is_null(), "{change}");
+        }
+    }
+    assert!(ledger_json(&f, &["ledger", "--json"])["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        ledger_json(&f, &["ledger", "--all", "--json"])["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!f
+        .run(&["ledger", "log"], "")
+        .unwrap()
+        .contains("SYNTHETIC_PRIVATE"));
+    for suffix in ["", "-wal"] {
+        let data = fs::read(format!("{}{suffix}", f.db().display())).unwrap_or_default();
+        assert!(!data
+            .windows(b"SYNTHETIC_PRIVATE".len())
+            .any(|s| s == b"SYNTHETIC_PRIVATE"));
+    }
+    f.run(&["ledger", "delete", "1", "--yes"], "").unwrap();
+    assert_eq!(ledger_json(&f, &["ledger", "--json"])["version"], 5);
+    assert!(f.run(&["ledger", "reopen", "1"], "").is_err());
+    f.run(&["ledger", "add", "state", "next"], "").unwrap();
+    assert_eq!(ledger_json(&f, &["ledger", "--json"])["items"][0]["no"], 2);
+}
+
+#[test]
+fn ledger_read_only_version_3_never_migrates_or_collects_saves() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    fs::create_dir_all(f.db().parent().unwrap()).unwrap();
+    fs::set_permissions(f.db().parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    let c = rusqlite::Connection::open(f.db()).unwrap();
+    fs::set_permissions(f.db(), fs::Permissions::from_mode(0o600)).unwrap();
+    c.pragma_update(None, "journal_mode", "WAL").unwrap();
+    c.execute_batch(include_str!("fixtures/schema_v3.sql"))
+        .unwrap();
+    c.execute(
+        "INSERT INTO projects(key,adopted) VALUES (?1,1)",
+        [f.cwd().canonicalize().unwrap().to_str().unwrap()],
+    )
+    .unwrap();
+    fs::set_permissions(f.db(), fs::Permissions::from_mode(0o600)).unwrap();
+    f.queued("## 停点\n尚未收取的合成记录");
+    for args in [vec!["ledger", "--json"], vec!["ledger", "--json", "--all"]] {
+        assert_eq!(
+            ledger_json(&f, &args),
+            serde_json::json!({"version":0,"items":[]})
+        );
+    }
+    assert!(f
+        .run(&["ledger", "export"], "")
+        .unwrap()
+        .contains("项目的账"));
+    let state: (String,i64,i64) = c.query_row("SELECT (SELECT value FROM meta WHERE key='schema_version'),(SELECT count(*) FROM records),(SELECT count(*) FROM sqlite_schema WHERE name='items')",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(state, ("3".into(), 0, 0));
+    let status: Value = serde_json::from_str(&f.run(&["status", "--json"], "").unwrap()).unwrap();
+    assert_eq!(
+        status["ledger"],
+        serde_json::json!({"failed_sessions":0,"last_failure":null})
+    );
+}
+
+#[test]
+fn concurrent_ledger_writes_allocate_distinct_numbers_and_versions() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let (cwd, db, root) = (f.cwd(), f.db(), f.root.path().to_path_buf());
+    let barrier = std::sync::Barrier::new(2);
+    for args in [
+        vec!["ledger", "add", "state", "concurrent"],
+        vec!["ledger", "edit", "1"],
+    ] {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = ["writer-a", "writer-b"]
+                .into_iter()
+                .map(|body| {
+                    let (args, barrier, cwd, db, root) = (&args, &barrier, &cwd, &db, &root);
+                    s.spawn(move || {
+                        barrier.wait();
+                        cli::run_at(
+                            Cli::try_parse_from(
+                                std::iter::once("cairn").chain(args.iter().copied()),
+                            )
+                            .unwrap(),
+                            &mut body.as_bytes(),
+                            cwd,
+                            db,
+                            root,
+                        )
+                        .map_err(|e| e.to_string())
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap().unwrap();
+            }
+        });
+    }
+    let list = ledger_json(&f, &["ledger", "--json"]);
+    assert_eq!(list["version"], 4);
+    assert_eq!(list["items"][0]["no"], 1);
+    assert_eq!(list["items"][1]["no"], 2);
+    let store = f.store();
+    let versions: Vec<i64> = store
+        .connection()
+        .prepare("SELECT ledger_version FROM item_changes ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(versions, [1, 2, 3, 4]);
+}
+
+#[test]
+fn ledger_failure_status_is_project_wide_but_injection_reports_this_line() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let store = f.store();
+    store
+        .connection()
+        .execute_batch(
+            "INSERT INTO projects(id,key,adopted) VALUES (2,'/synthetic/other-project',1);",
+        )
+        .unwrap();
+    let line = f.cwd().canonicalize().unwrap();
+    for (source, project, path, at, reason) in [
+        (
+            "claude:here",
+            1,
+            line.to_str().unwrap(),
+            "2026-10-15T01:00:00.000Z",
+            "本工作线合成失败",
+        ),
+        (
+            "codex:other-line",
+            1,
+            "/synthetic/other-line",
+            "2026-10-15T02:00:00.000Z",
+            "别的工作线合成失败",
+        ),
+        (
+            "codex:other-project",
+            2,
+            "/synthetic/other-project",
+            "2026-10-15T03:00:00.000Z",
+            "别的项目合成失败",
+        ),
+    ] {
+        store.connection().execute("INSERT INTO sources(id,agent,association,first_seen,last_seen) VALUES (?1,'codex','hook',?2,?2)",rusqlite::params![source,at]).unwrap();
+        store.connection().execute("INSERT INTO sessions(source_id,project_id,line_path,last_event_at,ledger_failures,ledger_last_failure_at,ledger_last_failure) VALUES (?1,?2,?3,?4,2,?4,?5)",rusqlite::params![source,project,path,at,reason]).unwrap();
+    }
+    let status: Value = serde_json::from_str(&f.run(&["status", "--json"], "").unwrap()).unwrap();
+    assert_eq!(status["ledger"]["failed_sessions"], 2);
+    assert_eq!(
+        status["ledger"]["last_failure"]["source_id"],
+        "codex:other-line"
+    );
+    assert_eq!(
+        status["ledger"]["last_failure"]["reason"],
+        "别的工作线合成失败"
+    );
+    let status = f.run(&["status"], "").unwrap();
+    assert!(status.contains("记账没写成的会话：2"));
+    assert!(status.contains("别的工作线合成失败"));
+    let show: Value = serde_json::from_str(&f.run(&["show", "--json"], "").unwrap()).unwrap();
+    let text = show["text"].as_str().unwrap();
+    assert!(text.contains("### 项目的账"));
+    assert!(text.contains("claude:here") && text.contains("本工作线合成失败"));
+    assert!(text.contains(" summarize`"));
+    assert!(!text.contains("别的工作线合成失败") && !text.contains("别的项目合成失败"));
+    assert_eq!(show["ledger_item_ids"], serde_json::json!([]));
+}
+
 static ENVIRONMENT: Mutex<()> = Mutex::new(());
 
 struct Fixture {
@@ -943,7 +1293,7 @@ fn json_contract_list_reads_v1_without_ingesting_or_upgrading() {
     store
         .connection()
         .execute_batch(
-            "DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version';
+            "DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version';
          PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
@@ -1209,7 +1559,7 @@ fn json_contract_show_collects_upgrades_and_preserves_body_and_correction() {
     let store = f.store();
     store
         .connection()
-        .execute_batch("DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version'")
+        .execute_batch("DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version'")
         .unwrap();
     let shown = f.show(&id);
     assert_eq!(shown["written_by"], "save");
@@ -1225,7 +1575,7 @@ fn json_contract_show_collects_upgrades_and_preserves_body_and_correction() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, "3");
+    assert_eq!(version, "4");
     for key in [
         "project_id",
         "project_key",
@@ -1271,7 +1621,7 @@ fn json_contract_version_2_is_read_only_and_defaults_writer_to_save() {
     store
         .connection()
         .execute_batch(
-            "DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by;
+            "DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by;
         UPDATE meta SET value='2' WHERE key='schema_version'; PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
