@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -53,6 +53,22 @@ pub fn trusted_root() -> Result<PathBuf> {
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .ok_or(Error::NoTemporaryRoot)
+}
+
+/// Use the spool's trusted-root policy for an isolated, disposable model cwd.
+pub(crate) fn sidecar_directory(root: &Path) -> Result<tempfile::TempDir> {
+    if !root.is_absolute() {
+        return Err(Error::UnsafeDirectory);
+    }
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(root)?;
+    check_directory(&directory, 0o022)?;
+    Ok(tempfile::Builder::new()
+        .prefix("cairn-sidecar-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(root)?)
 }
 
 pub struct Spool {

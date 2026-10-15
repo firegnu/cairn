@@ -5,7 +5,7 @@ use crate::facts::GitFacts;
 use crate::save::StoredFacts;
 use crate::scope::{Git, Scope};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
@@ -137,8 +137,8 @@ fn observed(connection: &Connection, record: &Record) -> Result<String> {
         [&record.source], |r| Ok((r.get(0)?,r.get(1)?)),
     )?;
     let ended: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE source_id=?1 AND kind='session_ended' AND at>?2)",
-        params![record.source, at],
+        "SELECT EXISTS(SELECT 1 FROM events WHERE source_id=?1 AND kind='session_ended' AND (at>?2 OR ?3))",
+        params![record.source, at, record.written_by == "sidecar"],
         |r| r.get(0),
     )?;
     let hooked: bool = connection.query_row(
@@ -151,7 +151,12 @@ fn observed(connection: &Connection, record: &Record) -> Result<String> {
         format!("该来源最后一次落盘：记录 {last_id}（{at}）\n")
     };
     Ok(format!(
-        "{latest}之后观测到的事件：{}{}。\n",
+        "{latest}{}：{}{}。\n",
+        if record.written_by == "sidecar" {
+            "观测到的会话事件"
+        } else {
+            "之后观测到的事件"
+        },
         if ended {
             "已观测到会话结束"
         } else {
@@ -175,7 +180,41 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
             .ok_or("项目路径不是 UTF-8")?,
     )?;
     let heading = header(request.source_id, request.command);
-    if all.is_empty() {
+    let mut summary_states = Vec::new();
+    for session in crate::sidecar::observations(connection, request.scope)? {
+        let mut state = String::new();
+        if session.summary.is_none() {
+            state.push_str(&format!("观测到 {} 个回合，还没有摘要；", session.turns));
+        } else if session.turns > session.summarized_turns {
+            state.push_str(&format!(
+                "摘要之后又有 {} 个回合，还没写进摘要；",
+                session.turns - session.summarized_turns
+            ));
+        }
+        if let Some(reason) = session.failure {
+            state.push_str(&format!(
+                "最近一次没写成：{reason}；可重试 `{} summarize`。",
+                request.command
+            ));
+        } else if session.summary.is_none() {
+            state.push_str(&format!(
+                "{}；可重试 `{} summarize`。",
+                if session.has_path {
+                    "尚未写摘要"
+                } else {
+                    "没有会话记录路径"
+                },
+                request.command
+            ));
+        }
+        if !state.is_empty() {
+            summary_states.push(Piece {
+                text: format!("会话 {}：{state}\n", session.source),
+                ids: vec![],
+            });
+        }
+    }
+    if all.is_empty() && summary_states.is_empty() {
         if heading.chars().count() > request.budget {
             return Err("预算不足以容纳抬头".into());
         }
@@ -370,6 +409,27 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
                 && Path::new(&r.line) == request.scope.line_path
         }) {
             let stored: StoredFacts = serde_json::from_str(record.facts.as_deref().unwrap())?;
+            let collected_at = DateTime::parse_from_rfc3339(&stored.collected_at)?;
+            let baseline = if record.written_by == "sidecar" {
+                // Facts are collected only at SessionStart and Stop. The last
+                // start event before that immutable snapshot distinguishes an
+                // unfinished first turn from a snapshot taken at a turn end.
+                let event: Option<String> = connection.query_row(
+                    "SELECT kind FROM events WHERE source_id=?1 AND at<=?2
+                     AND kind IN ('session_started','turn_started') ORDER BY at DESC,id DESC LIMIT 1",
+                    params![record.source,stored.collected_at],|r|r.get(0)).optional()?;
+                Some(format!(
+                    "{} 那次{}时",
+                    collected_at.format("%m-%d %H:%M"),
+                    match event.as_deref() {
+                        Some("session_started") => "会话开始",
+                        Some("turn_started") => "回合结束",
+                        _ => "事实采集",
+                    }
+                ))
+            } else {
+                None
+            };
             let facts = GitFacts {
                 head: stored.head,
                 branch: stored.branch,
@@ -377,16 +437,25 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
                 staged: stored.staged,
                 unstaged: stored.unstaged,
                 untracked: stored.untracked,
-                collected_at_unix_ms: DateTime::parse_from_rfc3339(&stored.collected_at)?
-                    .timestamp_millis()
-                    .try_into()?,
+                collected_at_unix_ms: collected_at.timestamp_millis().try_into()?,
             };
+            let mut lines = Git::default().compare(&facts, &request.scope.line_path)?;
+            if let Some(baseline) = &baseline {
+                if facts.head.is_some() {
+                    lines[0] = if lines[0].starts_with("HEAD 比") {
+                        lines[0].replacen("记录时", &format!(" {baseline}"), 1)
+                    } else {
+                        lines[0].replacen("记录时", baseline, 1)
+                    };
+                }
+            }
             comparison = format!(
-                "\n### 现场对比\n相对记录 {}：\n{}\n",
+                "\n### 现场对比\n相对记录 {}：\n{}{}\n",
                 record.id,
-                Git::default()
-                    .compare(&facts, &request.scope.line_path)?
-                    .join("\n")
+                baseline
+                    .map(|b| format!("事实基准：{b}（UTC）。\n"))
+                    .unwrap_or_default(),
+                lines.join("\n")
             );
         }
     }
@@ -437,6 +506,7 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
             .collect();
         append_section(&mut rendered, "\n### 本工作线\n", current);
         append_section(&mut rendered, "\n### 更早的来源\n", older.iter());
+        append_section(&mut rendered, "\n### 摘要状态\n", summary_states.iter());
         append_section(&mut rendered, "\n### 折叠提示\n", folded.iter());
         rendered.text.push_str(&comparison);
         append_section(&mut rendered, "\n### 其他工作线\n", summaries.iter());
@@ -458,7 +528,10 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
             *level = 1;
         } else if let Some(level) = levels.iter_mut().rev().find(|level| **level == 1) {
             *level = 2;
-        } else if summaries.pop().is_some() || folded.pop().is_some() {
+        } else if summaries.pop().is_some()
+            || folded.pop().is_some()
+            || summary_states.pop().is_some()
+        {
             continue;
         } else if let Some(level) = levels.iter_mut().rev().find(|level| **level == 2) {
             *level = 3;

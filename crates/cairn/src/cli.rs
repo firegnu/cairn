@@ -17,6 +17,9 @@ pub fn report(result: Result<String>) -> i32 {
             0
         }
         Err(error) => {
+            if let Some(failures) = error.downcast_ref::<crate::sidecar::SummaryFailures>() {
+                println!("{}", failures.output);
+            }
             eprintln!(
                 "{}",
                 error.to_string().lines().collect::<Vec<_>>().join(" ")
@@ -35,6 +38,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Summarize,
+    Config {
+        key: Option<String>,
+        value: Option<String>,
+    },
     Status {
         #[arg(long)]
         json: bool,
@@ -184,6 +192,10 @@ pub fn run_at(
             yes,
         } => return crate::install::run(agent, dry_run, yes, true, input),
         Command::Status { json } => return crate::status::run(cwd, database, root, json),
+        Command::Config { key, value } => {
+            let store = collect(database, root)?;
+            return crate::sidecar::config(store.connection(), key.as_deref(), value.as_deref());
+        }
         _ => (),
     }
     if let Command::Hook { agent } = cli.command {
@@ -193,6 +205,15 @@ pub fn run_at(
     let git = crate::scope::Git::default();
     let scope = git.resolve(cwd)?;
     match cli.command {
+        Command::Summarize => {
+            if std::env::var("CAIRN_DISABLE").as_deref() == Ok("1") {
+                return Ok("CAIRN_DISABLE=1，未写摘要".into());
+            }
+            let Some(mut store) = existing_store(database, root)? else {
+                return Ok("没有需要写摘要的会话".into());
+            };
+            crate::sidecar::summarize(&mut store, &scope, root)
+        }
         Command::Show { id, json } => {
             let Some(mut store) = existing_store(database, root)? else {
                 return Ok(if json {
