@@ -1,0 +1,6 @@
+{"type":"attachment","content":"ignored metadata"}
+{"type":"user","message":{"role":"user","content":"检查合成文件"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"ignored reasoning"},{"type":"text","text":"开始检查"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"fixture.txt"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"text","text":"合成结果"},{"type":"image","source":{"data":"ignored image"}}]}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"继续"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"检查完成"}]}}
