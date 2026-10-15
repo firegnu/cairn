@@ -268,6 +268,7 @@ CREATE TABLE item_changes (                                             -- 每�
   by TEXT NOT NULL,                                                     -- 来源 ID，或 user
   evidence TEXT,                                                        -- 依据摘录（旁路模型写的）；用户手动改可以为空
   before_title TEXT, before_body TEXT,                                  -- 改之前的内容；删除时置 NULL
+  close_reason TEXT,                                                    -- close 这一笔的理由（items.close_reason 在 reopen 后会清空，补注入要按笔给理由，§9.5）；删除时置 NULL
   ledger_version INTEGER NOT NULL,                                      -- 这一笔之后账的版本号
   at TEXT NOT NULL);
 CREATE TABLE ledgers (                                                  -- 每个项目一行
@@ -281,7 +282,7 @@ ALTER TABLE sessions ADD COLUMN ledger_injected_version INTEGER;                
 ```
 
 - 条目不照记录那样"写入后不改"：模型要按 `#no` 稳定引用，所以在 `items` 里原地改成最新版，旧内容进 `item_changes`。`item_changes` 只追加。
-- 删除（`cairn ledger delete`）是隐私用途：`items` 的标题、正文和这条的所有 `item_changes` 里的旧内容、依据一起清掉，只留墓碑；照 §12 用 `secure_delete`、清 WAL。
+- 删除（`cairn ledger delete`）是隐私用途：`items` 的标题、正文、了结理由和这条的所有 `item_changes` 里的旧内容、依据、了结理由一起清掉，只留墓碑；照 §12 用 `secure_delete`、清 WAL。
 - 已有的会话记录（`summarized_bytes` 之前的部分）不回头记账：升级时把每个 `sessions` 行的 `ledger_bytes` 设成当时的 `summarized_bytes`，`ledger_injected_version` 设成 0。
 - 升级照版本 2、3 的办法。0.4.x 遇到版本 4 的库会按"版本更新"拒绝，退回要连库换回装前的备份。
 
