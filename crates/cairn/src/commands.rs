@@ -17,7 +17,7 @@ fn target_records(connection: &Connection, id: &str) -> Result<Vec<Record>> {
         )
         .optional()?
         .ok_or("记录不存在")?;
-    render::records(connection, &key)
+    Ok(render::records(connection, &key)?)
 }
 
 fn target<'a>(all: &'a [Record], id: &str) -> Result<&'a Record> {
@@ -70,7 +70,7 @@ fn details(connection: &Connection, record: &Record) -> Result<Value> {
         "association": association, "agent": agent, "session_id": session_id,
         "kind": record.kind, "target_id": record.target, "created_at": record.at,
         "deleted_at": record.deleted_at, "replaced_by": record.replaced_by,
-        "retracted": record.retracted, "status": status(record),
+        "retracted": record.retracted, "status": status(record), "written_by": record.written_by,
         "body": if deleted { None } else { record.body.as_deref() }, "facts": facts,
     }))
 }
@@ -245,7 +245,7 @@ pub(crate) fn list_json(
             "line_path": record.line, "branch": record.branch,
             "kind": record.kind, "target_id": record.target,
             "deleted_at": record.deleted_at, "replaced_by": record.replaced_by,
-            "retracted": record.retracted, "summary": summary,
+            "retracted": record.retracted, "summary": summary, "written_by": record.written_by,
         }));
     }
     Ok(serde_json::to_string(

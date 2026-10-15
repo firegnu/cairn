@@ -122,7 +122,7 @@ fn save_command_paths_match_installed_permission_in_hooks_and_show() {
                 .step_by(2)
                 .filter_map(|command| command.split_once(" save --source ").map(|(path, _)| path))
                 .collect();
-            assert_eq!(paths, vec![path, path], "{text}");
+            assert_eq!(paths, vec![path], "{text}");
         };
         for agent in ["claude", "codex"] {
             let hook = |event: &str| {
@@ -141,9 +141,7 @@ fn save_command_paths_match_installed_permission_in_hooks_and_show() {
                     .unwrap(),
             );
             assert!(hook("UserPromptSubmit").is_empty());
-            let stop: Value = serde_json::from_str(&hook("Stop")).unwrap();
-            assert_eq!(stop["decision"], "block");
-            check(stop["reason"].as_str().unwrap());
+            assert!(hook("Stop").is_empty());
         }
         check(&run(&["show"], ""));
         let status: Value = serde_json::from_str(&run(&["status", "--json"], "")).unwrap();

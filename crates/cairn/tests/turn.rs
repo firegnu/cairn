@@ -13,6 +13,7 @@ struct Fixture {
     root: tempfile::TempDir,
     database: PathBuf,
     project: PathBuf,
+    scope: cairn::scope::Scope,
 }
 
 impl Fixture {
@@ -28,6 +29,11 @@ impl Fixture {
         let fixture = Self {
             root,
             database,
+            scope: cairn::scope::Scope {
+                project_key: project.clone(),
+                line_path: project.clone(),
+                is_git: false,
+            },
             project,
         };
         fixture
@@ -93,10 +99,10 @@ impl Fixture {
 
     fn context<'a>(&'a self, at: &'a str) -> Context<'a> {
         Context {
-            command: "/synthetic/cairn/bin/cairn",
             database: &self.database,
             spool_root: self.root.path(),
-            project_key: &self.project,
+            scope: &self.scope,
+            transcript_path: Some("/synthetic/transcript"),
             agent: Agent::Codex,
             session_id: "synthetic",
             at,
@@ -160,23 +166,12 @@ fn turn_start_registers_hook_source_and_records_received_time() {
 }
 
 #[test]
-fn duplicate_turn_end_requests_continuation_only_once() {
+fn duplicate_turn_end_is_always_allowed_without_decisions() {
     let f = Fixture::new(true);
     allowed(turn::turn_started(f.context(START), Some("turn-1")));
-    let first = turn::turn_ended(f.context(END), Some("turn-1"), false);
-    assert!(first.errors.is_empty());
-    assert_eq!(first.action, Action::Continue {
-        reason: "cairn：本回合没有收到接续确认。请判断本回合是否产生了需要下一次会话接续的内容：有则 `/synthetic/cairn/bin/cairn save --source codex:synthetic`，没有则 `/synthetic/cairn/bin/cairn save --source codex:synthetic --nothing-new`。之后把你上一条最终回答原样再给出一次，不要提及本提示。".into(),
-    });
-    allowed(turn::turn_ended(
-        f.context("2026-10-05T00:02:01.000Z"),
-        Some("turn-1"),
-        false,
-    ));
-    assert_eq!(
-        decisions(&f),
-        [("turn-1".into(), "continue_requested".into(), END.into())]
-    );
+    allowed(turn::turn_ended(f.context(END)));
+    allowed(turn::turn_ended(f.context("2026-10-05T00:02:01.000Z")));
+    assert!(decisions(&f).is_empty());
 }
 
 fn decisions(f: &Fixture) -> Vec<(String, String, String)> {
@@ -186,97 +181,43 @@ fn decisions(f: &Fixture) -> Vec<(String, String, String)> {
 }
 
 #[test]
-fn pure_decision_respects_continuation_confirmation_pending_and_missing_key() {
-    use cairn::ingest::Pending;
-    use turn::{decide, Facts, Outcome};
-    for (continued, confirmed, pending, has_turn_key, expected) in [
-        (true, true, Pending::Yes, true, Outcome::Confirmed),
-        (
-            true,
-            false,
-            Pending::Unknown,
-            true,
-            Outcome::UnconfirmedAfterContinue,
-        ),
-        (false, true, Pending::Unknown, true, Outcome::Confirmed),
-        (
-            false,
-            false,
-            Pending::Yes,
-            true,
-            Outcome::PendingUnprocessed,
-        ),
-        (
-            false,
-            false,
-            Pending::Unknown,
-            true,
-            Outcome::PendingUnprocessed,
-        ),
-        (false, false, Pending::No, true, Outcome::ContinueRequested),
-        (false, false, Pending::No, false, Outcome::Skipped),
-        (
-            true,
-            false,
-            Pending::No,
-            false,
-            Outcome::UnconfirmedAfterContinue,
-        ),
-        (false, true, Pending::No, false, Outcome::Confirmed),
-        (
-            false,
-            false,
-            Pending::Yes,
-            false,
-            Outcome::PendingUnprocessed,
-        ),
-    ] {
-        let facts = Facts {
-            continued,
-            confirmed,
-            pending,
-            has_turn_key,
-        };
-        assert_eq!(decide(facts), expected, "{facts:?}");
-    }
+fn turn_end_does_not_read_legacy_confirmation_or_decision_tables() {
+    let f = Fixture::new(true);
+    f.session_start();
+    let store = f.store();
+    // These tables remain in production. Removing them in the fixture proves
+    // that an empty-spool Stop no longer reads either decision input.
+    store
+        .connection()
+        .execute_batch("DROP TABLE confirmations; DROP TABLE turn_decisions")
+        .unwrap();
+    allowed(turn::turn_ended(f.context(END)));
+    let at: String = store
+        .connection()
+        .query_row("SELECT last_event_at FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(at, END);
 }
 
 #[test]
-fn continued_stop_records_confirmation_or_gap_and_never_requests_again() {
+fn repeated_stop_is_allowed_with_or_without_confirmation() {
     for confirmed in [false, true] {
         let f = Fixture::new(true);
         allowed(turn::turn_started(f.context(START), Some("turn-1")));
-        assert!(matches!(
-            turn::turn_ended(f.context(END), Some("turn-1"), false).action,
-            Action::Continue { .. }
-        ));
+        allowed(turn::turn_ended(f.context(END)));
         if confirmed {
             confirm(&f, "codex:synthetic", "nothing_new", END);
         }
-        for key in ["turn-1", "changed-continuation-id"] {
-            allowed(turn::turn_ended(
-                f.context("2026-10-05T00:03:00.000Z"),
-                Some(key),
-                true,
-            ));
-            allowed(turn::turn_ended(
-                f.context("2026-10-05T00:03:01.000Z"),
-                Some(key),
-                true,
-            ));
+        for _ in 0..4 {
+            allowed(turn::turn_ended(f.context("2026-10-05T00:03:00.000Z")));
         }
-        let rows = decisions(&f);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(
-            rows.iter().filter(|r| r.1 == "continue_requested").count(),
-            1
-        );
-        let outcome = if confirmed {
-            "confirmed"
-        } else {
-            "unconfirmed_after_continue"
-        };
-        assert_eq!(rows.iter().filter(|r| r.1 == outcome).count(), 2);
+        assert!(decisions(&f).is_empty());
+        let turns: i64 = f
+            .store()
+            .connection()
+            .query_row("SELECT turns FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(turns, 1);
     }
 }
 
@@ -291,28 +232,28 @@ fn confirm(f: &Fixture, source: &str, kind: &str, at: &str) {
 }
 
 #[test]
-fn turn_end_collects_before_checking_committed_confirmation() {
-    let f = Fixture::new(true);
-    allowed(turn::turn_started(f.context(START), Some("turn-1")));
-    let id = f.publish(None, START);
-    allowed(turn::turn_ended(f.context(END), Some("turn-1"), false));
-    assert_eq!(
-        decisions(&f),
-        [("turn-1".into(), "confirmed".into(), END.into())]
-    );
-    let confirmation: (String, String) = f
-        .store()
-        .connection()
-        .query_row("SELECT op_id,at FROM confirmations", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-        .unwrap();
-    assert_eq!(confirmation, (id, START.into()));
-    assert_eq!(f.spool().status().unwrap().pending_json, 0);
+fn turn_end_collects_voluntary_save_and_nothing_new_without_deciding() {
+    for body in [None, Some("## 停点\n自愿保存")] {
+        let f = Fixture::new(true);
+        allowed(turn::turn_started(f.context(START), Some("turn-1")));
+        let id = f.publish(body, START);
+        allowed(turn::turn_ended(f.context(END)));
+        assert!(decisions(&f).is_empty());
+        let confirmation: (String, String) = f
+            .store()
+            .connection()
+            .query_row("SELECT op_id,at FROM confirmations", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(confirmation, (id, START.into()));
+        assert_eq!(f.spool().status().unwrap().pending_json, 0);
+        assert_eq!(activity_counts(&f)[5], i64::from(body.is_some()));
+    }
 }
 
 #[test]
-fn unprocessed_or_unknown_spool_is_pending_never_a_confirmation_or_continuation() {
+fn unprocessed_or_unknown_spool_never_changes_allow_or_writes_decisions() {
     for unknown in [false, true] {
         let f = Fixture::new(true);
         allowed(turn::turn_started(f.context(START), Some("turn-1")));
@@ -324,62 +265,40 @@ fn unprocessed_or_unknown_spool_is_pending_never_a_confirmation_or_continuation(
             )
             .unwrap();
         } else {
-            // Every file lacks the mandatory heading and will be rejected when
-            // collected; the 51st cannot pass the existing 50-file ingest cap.
             for _ in 0..51 {
                 f.publish(Some("SYNTHETIC_BODY_WITHOUT_HEADING"), START);
             }
         }
-        let result = turn::turn_ended(f.context(END), Some("turn-1"), false);
-        assert_eq!(result.action, Action::Allow);
-        if unknown {
-            assert_eq!(
-                result.errors.len(),
-                1,
-                "unknown query must be visible to the error logger"
-            );
-        } else {
-            assert!(result.errors.is_empty());
-        }
-        assert_eq!(
-            decisions(&f),
-            [("turn-1".into(), "pending_unprocessed".into(), END.into())]
-        );
+        allowed(turn::turn_ended(f.context(END)));
+        assert!(decisions(&f).is_empty());
         assert!(f.spool().status().unwrap().pending_json > 0);
-        let confirmed: i64 = f
-            .store()
-            .connection()
-            .query_row("SELECT COUNT(*) FROM confirmations", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(confirmed, 0);
+        assert_eq!(activity_counts(&f)[3], 0);
     }
 }
 
 #[test]
-fn continuation_includes_only_rejection_reasons_for_this_source_and_window() {
+fn rejection_is_recorded_without_body_or_continuation() {
     let f = Fixture::new(true);
     allowed(turn::turn_started(f.context(START), Some("turn-1")));
-    f.publish(Some("PRIVATE_SYNTHETIC_BODY"), START);
-    let store = f.store();
-    for (source, at) in [("codex:other", START), ("codex:synthetic", SESSION)] {
-        store
-            .connection()
-            .execute(
-                "INSERT INTO events(source_id,kind,at,detail) VALUES (?1,'save_rejected',?2,?3)",
-                params![source, at, r#"{"reason":"OUTSIDE_WINDOW_OR_SOURCE"}"#],
-            )
-            .unwrap();
-    }
-    let report = turn::turn_ended(f.context(END), Some("turn-1"), false);
-    assert!(report.errors.is_empty(), "{:?}", report.errors);
-    let Action::Continue { reason } = report.action else {
-        panic!("expected continuation")
-    };
-    assert!(reason.starts_with("cairn：本回合没有收到接续确认。"));
-    assert!(reason.contains("正文必须有 ## 停点 一节"), "{reason}");
-    assert!(reason.contains("请改正后重新 save"));
+    let id = f.publish(Some("PRIVATE_SYNTHETIC_BODY"), START);
+    // Old rejection metadata is not parsed to construct continuation messages.
+    f.store().connection().execute(
+        "INSERT INTO events(source_id,kind,at,detail) VALUES ('codex:synthetic','save_rejected',?1,'not JSON')", [START]
+    ).unwrap();
+    allowed(turn::turn_ended(f.context(END)));
+    let (outcome, reason): (String, String) = f
+        .store()
+        .connection()
+        .query_row(
+            "SELECT outcome,reason FROM spool_ops WHERE op_id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(outcome, "rejected");
+    assert!(reason.contains("正文必须有 ## 停点 一节"));
     assert!(!reason.contains("PRIVATE_SYNTHETIC_BODY"));
-    assert!(!reason.contains("OUTSIDE_WINDOW_OR_SOURCE"));
+    assert!(decisions(&f).is_empty());
     assert_eq!(f.spool().status().unwrap().pending_json, 0);
 }
 
@@ -427,118 +346,89 @@ fn activity_counts(f: &Fixture) -> [i64; 6] {
 }
 
 #[test]
-fn missing_turn_key_skips_even_when_duplicate_delivery_advances_fallback_window() {
+fn missing_turn_key_or_start_still_records_the_session_without_decisions() {
     for has_start in [false, true] {
         let f = Fixture::new(true);
-        f.session_start();
         if has_start {
             allowed(turn::turn_started(f.context(START), None));
         }
-        allowed(turn::turn_ended(f.context(END), None, false));
-        allowed(turn::turn_ended(
-            f.context("2026-10-05T00:03:00.000Z"),
-            None,
-            false,
-        ));
-        let rows = decisions(&f);
-        assert!(rows.iter().all(|r| r.1 == "skipped"));
-        if has_start {
-            assert_eq!(
-                rows,
-                [(format!("no-key:{START}"), "skipped".into(), END.into())]
-            );
-        } else {
-            assert_eq!(
-                rows,
-                [
-                    (format!("no-key:{SESSION}"), "skipped".into(), END.into()),
-                    (
-                        format!("no-key:{END}"),
-                        "skipped".into(),
-                        "2026-10-05T00:03:00.000Z".into()
-                    ),
-                ]
-            );
-        }
+        allowed(turn::turn_ended(f.context(END)));
+        allowed(turn::turn_ended(f.context(END)));
+        assert!(decisions(&f).is_empty());
+        let turns: i64 = f
+            .store()
+            .connection()
+            .query_row("SELECT turns FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(turns, i64::from(has_start));
     }
 }
 
 #[test]
-fn late_start_and_interleaved_turn_ends_preserve_one_request_per_turn() {
+fn late_start_and_interleaved_ends_preserve_observed_turn_counts() {
     let f = Fixture::new(true);
-    f.session_start();
-    // TurnEnded A arrives before A's TurnStarted, then B is interleaved.
-    let first = turn::turn_ended(f.context(END), Some("A"), false);
-    assert!(first.errors.is_empty());
-    assert!(matches!(first.action, Action::Continue { .. }));
+    allowed(turn::turn_ended(f.context(END)));
     allowed(turn::turn_started(
-        f.context("2026-10-05T00:03:00.000Z"),
+        Context {
+            transcript_path: Some("/synthetic/stale"),
+            ..f.context(START)
+        },
         Some("A"),
     ));
-    allowed(turn::turn_started(
-        f.context("2026-10-05T00:04:00.000Z"),
-        Some("B"),
-    ));
-    let second = turn::turn_ended(f.context("2026-10-05T00:05:00.000Z"), Some("B"), false);
-    assert!(second.errors.is_empty());
-    assert!(matches!(second.action, Action::Continue { .. }));
-    for key in ["A", "B", "A"] {
-        allowed(turn::turn_ended(
-            f.context("2026-10-05T00:06:00.000Z"),
-            Some(key),
-            false,
-        ));
+    let metadata: (String, String) = f
+        .store()
+        .connection()
+        .query_row(
+            "SELECT last_event_at,transcript_path FROM sessions",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(metadata, (END.into(), "/synthetic/transcript".into()));
+    allowed(turn::turn_started(f.context(END), Some("B")));
+    for _ in 0..3 {
+        allowed(turn::turn_ended(f.context(END)));
     }
-    assert_eq!(
-        decisions(&f),
-        [
-            ("A".into(), "continue_requested".into(), END.into()),
-            (
-                "B".into(),
-                "continue_requested".into(),
-                "2026-10-05T00:05:00.000Z".into()
-            ),
-        ]
-    );
+    assert!(decisions(&f).is_empty());
+    let turns: i64 = f
+        .store()
+        .connection()
+        .query_row("SELECT turns FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(turns, 2);
 }
 
 #[test]
-fn concurrent_duplicate_ends_atomically_request_at_most_once() {
+fn concurrent_duplicate_starts_increment_atomically_and_ends_are_allowed() {
     let f = Fixture::new(true);
-    allowed(turn::turn_started(f.context(START), Some("same-turn")));
     let barrier = std::sync::Barrier::new(4);
-    let reports = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         let handles: Vec<_> = (0..4)
             .map(|_| {
                 scope.spawn(|| {
                     barrier.wait();
-                    turn::turn_ended(f.context(END), Some("same-turn"), false)
+                    allowed(turn::turn_started(f.context(START), Some("same-turn")));
+                    allowed(turn::turn_ended(f.context(END)));
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect::<Vec<_>>()
+        for handle in handles {
+            handle.join().unwrap();
+        }
     });
-    assert!(reports.iter().all(|r| r.errors.is_empty()), "{reports:?}");
-    assert_eq!(
-        reports
-            .iter()
-            .filter(|r| matches!(r.action, Action::Continue { .. }))
-            .count(),
-        1
-    );
-    assert_eq!(
-        decisions(&f),
-        [("same-turn".into(), "continue_requested".into(), END.into())]
-    );
+    assert!(decisions(&f).is_empty());
+    let turns: i64 = f
+        .store()
+        .connection()
+        .query_row("SELECT turns FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(turns, 4);
 }
 
 fn all_entries(context: Context<'_>) -> [Report; 3] {
     [
         turn::turn_started(context, Some("turn-1")),
-        turn::turn_ended(context, Some("turn-1"), false),
+        turn::turn_ended(context),
         turn::session_ended(context, Some("other")),
     ]
 }
@@ -551,48 +441,36 @@ fn database_busy_and_sql_failure_allow_with_errors_and_no_partial_events() {
         let store = f.store();
         if busy {
             store.connection().execute_batch("BEGIN IMMEDIATE").unwrap();
-            store.connection().execute(
-                "INSERT INTO confirmations(source_id,kind,at) VALUES ('codex:synthetic','nothing_new',?1)",
-                [END],
-            ).unwrap();
         } else {
-            store
-                .connection()
-                .execute_batch("DROP TABLE events")
-                .unwrap();
+            store.connection().execute_batch(
+                "CREATE TRIGGER fail_seen BEFORE INSERT ON hook_seen BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;"
+            ).unwrap();
         }
         for result in all_entries(f.context(END)) {
             assert_eq!(result.action, Action::Allow);
-            assert!(
-                !result.errors.is_empty(),
-                "expected surfaced database error"
-            );
+            assert!(!result.errors.is_empty());
         }
         if busy {
             store.connection().execute_batch("ROLLBACK").unwrap();
-            assert_eq!(activity_counts(&f), [1, 1, 0, 0, 0, 0]);
         }
+        assert_eq!(activity_counts(&f), [1, 1, 0, 0, 0, 0]);
         let last_seen: String = store
             .connection()
-            .query_row(
-                "SELECT last_seen FROM sources WHERE id='codex:synthetic'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT last_seen FROM sources", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(
-            last_seen, SESSION,
-            "failed TurnStarted must roll back its source update"
-        );
-        assert!(decisions(&f).is_empty());
-        if busy {
-            let recovered = turn::turn_ended(f.context(END), Some("turn-1"), false);
-            assert!(recovered.errors.is_empty());
-            assert!(
-                matches!(recovered.action, Action::Continue { .. }),
-                "uncommitted confirmation cannot count or consume the request slot"
-            );
+        assert_eq!(last_seen, SESSION);
+        let sessions: i64 = store
+            .connection()
+            .query_row("SELECT count(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sessions, 0);
+        if !busy {
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER fail_seen")
+                .unwrap();
         }
+        allowed(turn::turn_ended(f.context(END)));
     }
 }
 
@@ -625,72 +503,40 @@ fn disabled_unadopted_and_missing_database_never_write_or_collect() {
 }
 
 #[test]
-fn confirmation_windows_use_latest_start_then_previous_decision_then_session() {
+fn historical_confirmations_and_decisions_are_preserved_but_do_not_affect_stop() {
     for origin in ["turn", "previous", "session", "source"] {
         for valid in [false, true] {
             let f = Fixture::new(true);
             f.session_start();
-            let since = match origin {
-                "turn" => {
-                    allowed(turn::turn_started(f.context(START), Some("first-start")));
-                    allowed(turn::turn_started(f.context(END), Some("latest-start")));
-                    END
-                }
+            match origin {
+                "turn" => allowed(turn::turn_started(f.context(START), Some("start"))),
                 "previous" => {
                     f.store().connection().execute(
-                        "INSERT INTO turn_decisions(source_id,turn_key,outcome,at) VALUES ('codex:synthetic','prior','confirmed',?1)", [END],
+                        "INSERT INTO turn_decisions VALUES ('codex:synthetic','prior','continue_requested',?1)", [END]
                     ).unwrap();
-                    END
                 }
                 "source" => {
                     f.store()
                         .connection()
                         .execute("DELETE FROM events", [])
                         .unwrap();
-                    SESSION
                 }
-                _ => SESSION,
-            };
+                _ => {}
+            }
             confirm(&f, "codex:other", "nothing_new", END);
-            let before = if since == SESSION {
-                "2026-10-04T23:59:59.999Z"
-            } else {
-                START
-            };
-            confirm(&f, "codex:synthetic", "nothing_new", before);
+            confirm(&f, "codex:synthetic", "nothing_new", SESSION);
             if valid {
-                confirm(&f, "codex:synthetic", "saved", since);
+                confirm(&f, "codex:synthetic", "saved", START);
             }
-            let result = turn::turn_ended(
-                f.context("2026-10-05T00:03:00.000Z"),
-                Some("current"),
-                false,
-            );
-            assert!(result.errors.is_empty(), "{origin}: {:?}", result.errors);
-            if valid {
-                assert_eq!(result.action, Action::Allow, "{origin}: inclusive start");
-            } else {
-                assert!(
-                    matches!(result.action, Action::Continue { .. }),
-                    "{origin}: stale or other-source confirmation"
-                );
-            }
-            let rows = decisions(&f);
-            let current = rows.iter().find(|r| r.0 == "current").unwrap();
-            assert_eq!(
-                current.1,
-                if valid {
-                    "confirmed"
-                } else {
-                    "continue_requested"
-                }
-            );
+            let before = decisions(&f);
+            allowed(turn::turn_ended(f.context(END)));
+            assert_eq!(decisions(&f), before);
         }
     }
 }
 
 #[test]
-fn ingestion_failure_still_records_observations_but_never_requests_continuation() {
+fn ingestion_failure_still_records_session_metadata_and_can_retry() {
     for case in ["pending", "confirmed", "other-source"] {
         let f = Fixture::new(true);
         allowed(turn::turn_started(f.context(START), Some("turn-1")));
@@ -705,62 +551,40 @@ fn ingestion_failure_still_records_observations_but_never_requests_continuation(
             },
             ..f.context(END)
         };
-        if case == "other-source" {
-            allowed(turn::turn_started(
-                Context {
-                    at: START,
-                    ..context
-                },
-                Some("turn-1"),
-            ));
-        }
         let id = f.publish(None, START);
         let store = f.store();
         store.connection().execute_batch(
-            "CREATE TRIGGER fail_ingest BEFORE INSERT ON spool_ops BEGIN SELECT RAISE(ABORT,'synthetic ingest failure'); END;",
+            "CREATE TRIGGER fail_ingest BEFORE INSERT ON spool_ops BEGIN SELECT RAISE(ABORT,'synthetic ingest failure'); END;"
         ).unwrap();
-        let report = turn::turn_ended(context, Some("turn-1"), false);
+        let report = turn::turn_ended(context);
         assert_eq!(report.action, Action::Allow);
-        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0]
             .to_string()
             .contains("synthetic ingest failure"));
         assert!(f.spool().path().join(format!("{id}.json")).exists());
-        let rows = decisions(&f);
-        if case == "other-source" {
-            assert_eq!(activity_counts(&f)[2], 0);
-        } else {
-            assert_eq!(rows.len(), 1);
-            assert_eq!(
-                rows[0].1,
-                if case == "pending" {
-                    "pending_unprocessed"
-                } else {
-                    "confirmed"
-                }
-            );
-        }
+        assert!(decisions(&f).is_empty());
+        let at: String = store
+            .connection()
+            .query_row(
+                "SELECT last_event_at FROM sessions WHERE source_id=?1",
+                [format!("codex:{}", context.session_id)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(at, END);
         store
             .connection()
             .execute_batch("DROP TRIGGER fail_ingest")
             .unwrap();
-        let recovered = turn::turn_ended(context, Some("turn-1"), false);
-        assert!(recovered.errors.is_empty());
-        if case == "other-source" {
-            assert!(
-                matches!(recovered.action, Action::Continue { .. }),
-                "error must not consume continuation slot"
-            );
-        } else {
-            assert_eq!(recovered.action, Action::Allow);
-            assert!(decisions(&f).iter().any(|r| r.1 == "confirmed"));
-        }
+        allowed(turn::turn_ended(context));
+        assert!(decisions(&f).is_empty());
         assert_eq!(f.spool().status().unwrap().pending_json, 0);
     }
 }
 
 #[test]
-fn spool_open_failure_preserves_confirmed_continued_decision_and_error() {
+fn spool_open_failure_preserves_session_metadata_and_error() {
     use std::os::unix::fs::PermissionsExt;
 
     let f = Fixture::new(true);
@@ -775,18 +599,15 @@ fn spool_open_failure_preserves_confirmed_continued_decision_and_error() {
     std::fs::create_dir(&spool_directory).unwrap();
     std::fs::set_permissions(&spool_directory, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let result = turn::turn_ended(f.context(END), Some("turn-1"), true);
+    let result = turn::turn_ended(f.context(END));
 
     assert_eq!(result.action, Action::Allow);
     assert!(matches!(
         result.errors.as_slice(),
         [turn::Error::Spool(cairn::spool::Error::UnsafeDirectory)]
     ));
-    assert_eq!(
-        decisions(&f),
-        [("turn-1".into(), "confirmed".into(), END.into())]
-    );
-    assert_eq!(activity_counts(&f), [1, 1, 1, 1, 0, 0]);
+    assert!(decisions(&f).is_empty());
+    assert_eq!(activity_counts(&f), [1, 1, 0, 1, 0, 0]);
     assert_eq!(
         std::fs::metadata(&spool_directory)
             .unwrap()

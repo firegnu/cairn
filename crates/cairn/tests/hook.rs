@@ -116,12 +116,8 @@ impl Drop for Fixture {
         }
     }
 }
-fn allow(agent: &str, case: &str) -> &'static str {
-    if agent == "codex" && case.starts_with("stop") {
-        "{}"
-    } else {
-        ""
-    }
+fn allow(_agent: &str, _case: &str) -> &'static str {
+    ""
 }
 
 #[test]
@@ -155,6 +151,7 @@ fn unadopted_events_are_silent_and_do_not_create_storage() {
         "spool_ops",
         "turn_decisions",
         "hook_seen",
+        "sessions",
     ] {
         let count: i64 = store
             .connection()
@@ -181,13 +178,7 @@ fn adopted_fixtures_dispatch_and_stop_formats_match_each_agent() {
             .unwrap()
             .contains(&format!("{agent}:synthetic-{agent}-session")));
         assert_eq!(f.hook(agent, "user_prompt_submit"), "");
-        let output: Value = serde_json::from_str(&f.hook(agent, "stop")).unwrap();
-        assert_eq!(output["decision"], "block");
-        assert!(output["reason"]
-            .as_str()
-            .unwrap()
-            .contains("cairn save --source"));
-        assert_eq!(f.hook(agent, "stop"), allow(agent, "stop"));
+        assert_eq!(f.hook(agent, "stop"), "");
         assert_eq!(f.hook(agent, "stop_continued"), allow(agent, "stop"));
         assert_eq!(f.hook(agent, "session_end"), "");
     }
@@ -220,8 +211,11 @@ fn adopted_fixtures_dispatch_and_stop_formats_match_each_agent() {
                 ),
             ]
         );
-        let key: String = store.connection().query_row("SELECT turn_key FROM turn_decisions WHERE source_id=?1 AND outcome='unconfirmed_after_continue'", [format!("{agent}:synthetic-{agent}-session")], |r| r.get(0)).unwrap();
-        assert_eq!(key, format!("synthetic-{agent}-turn"));
+        let count: i64 = store
+            .connection()
+            .query_row("SELECT count(*) FROM turn_decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }
 
@@ -229,14 +223,16 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
-fn check_stop_requires_continuation_marker(agent: &str) {
+fn check_stop_ignores_continuation_marker(agent: &str) {
     let f = Fixture::new();
     f.run(&["adopt"], "");
     assert_eq!(f.hook(agent, "user_prompt_submit"), "");
-    for (index, marker) in [None, Some(Value::from("PRIVATE-INVALID-MARKER-R1"))]
-        .into_iter()
-        .enumerate()
-    {
+    for marker in [
+        None,
+        Some(Value::from("PRIVATE-INVALID-MARKER-R1")),
+        Some(true.into()),
+        Some(false.into()),
+    ] {
         let mut stop = f.payload(agent, "stop");
         stop["prompt"] = "PRIVATE-PROMPT-R1".into();
         stop["last_assistant_message"] = "PRIVATE-ANSWER-R1".into();
@@ -257,23 +253,19 @@ fn check_stop_requires_continuation_marker(agent: &str) {
             .query_row("SELECT count(*) FROM turn_decisions", [], |row| row.get(0))
             .unwrap();
         assert_eq!(decisions, 0);
-        let log = f.log();
-        assert_eq!(log.lines().count(), index + 1);
-        assert!(log.lines().all(
-            |line| line.ends_with(&format!("{agent} Stop json invalid hook JSON or metadata"))
-        ));
-        assert!(!log.contains("PRIVATE-"));
+        assert!(!f.db().with_file_name("errors.log").exists());
+        assert!(last_seen(&f, agent, "Stop").is_string());
     }
 }
 
 #[test]
-fn stop_requires_continuation_marker_claude() {
-    check_stop_requires_continuation_marker("claude");
+fn stop_ignores_continuation_marker_claude() {
+    check_stop_ignores_continuation_marker("claude");
 }
 
 #[test]
-fn stop_requires_continuation_marker_codex() {
-    check_stop_requires_continuation_marker("codex");
+fn stop_ignores_continuation_marker_codex() {
+    check_stop_ignores_continuation_marker("codex");
 }
 
 impl Fixture {
@@ -359,14 +351,7 @@ fn failures_exit_zero_with_private_bounded_single_line_logs() {
         let output = f.process(agent, "{\"prompt\":\"PRIVATE-PROMPT-MARKER-4Q7\", broken");
         assert_eq!(output.status.code(), Some(0));
         assert!(output.stderr.is_empty());
-        assert_eq!(
-            output.stdout,
-            if agent == "codex" {
-                b"{}".as_slice()
-            } else {
-                b""
-            }
-        );
+        assert!(output.stdout.is_empty());
     }
     let log = f.log();
     assert_eq!(log.lines().count(), 2);
@@ -384,8 +369,8 @@ fn failures_exit_zero_with_private_bounded_single_line_logs() {
     )
     .unwrap();
     let mut bad = f.payload("codex", "stop");
-    bad["stop_hook_active"] = "PRIVATE-ANSWER-MARKER-8R2".into();
-    assert_eq!(f.run(&["hook", "codex"], &bad.to_string()), "{}");
+    bad["session_id"] = serde_json::json!(["PRIVATE-ANSWER-MARKER-8R2"]);
+    assert_eq!(f.run(&["hook", "codex"], &bad.to_string()), "");
     let log = f.log();
     assert_eq!(log.lines().count(), 200);
     assert!(log.starts_with("old-6\n"));
@@ -418,7 +403,7 @@ fn privacy_fields_never_reach_storage_output_or_error_logs() {
         for marker in markers {
             assert!(!output.contains(marker));
         }
-        payload["stop_hook_active"] = markers[1].into();
+        payload["session_id"] = serde_json::json!([markers[1]]);
         let output = f.run(&["hook", agent], &payload.to_string());
         for marker in markers {
             assert!(!output.contains(marker));
@@ -437,7 +422,7 @@ fn privacy_fields_never_reach_storage_output_or_error_logs() {
             }
         }
     }
-    check_tree(f.db().parent().unwrap(), &markers);
+    check_tree(f.db().parent().unwrap(), &markers[..2]);
     check_tree(&f.root.path().join("cairn-spool"), &markers);
 }
 
@@ -489,8 +474,8 @@ fn database_busy_core_failure_and_session_end_deadline_fail_open() {
     assert!(pending.iter().all(|path| path.exists()));
     let mut stop = f.payload("codex", "stop");
     stop["session_id"] = "unobserved-source".into();
-    assert_eq!(f.run(&["hook", "codex"], &stop.to_string()), "{}");
-    assert!(f.log().contains("codex Stop core"));
+    assert_eq!(f.run(&["hook", "codex"], &stop.to_string()), "");
+    assert!(!f.log().contains("codex Stop core"));
     let bin = f.root.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let git = bin.join("git");
@@ -515,7 +500,7 @@ fn start_kinds_missing_turn_key_and_unknown_event_follow_mapping() {
             ("resume", "resume"),
             ("clear", "clear"),
             ("compact", "compact"),
-            ("fork", "other"),
+            ("fork", "fork"),
             ("future", "other"),
         ] {
             let mut payload = f.payload(agent, "session_start");
@@ -654,7 +639,7 @@ fn version_1_database_reports_nothing_seen_until_a_hook_upgrades_it() {
     let connection = rusqlite::Connection::open(f.db()).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE hook_seen; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
+            "DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
         )
         .unwrap();
     let version = |connection: &rusqlite::Connection| -> String {
@@ -677,6 +662,136 @@ fn version_1_database_reports_nothing_seen_until_a_hook_upgrades_it() {
     assert_eq!(version(&connection), "1");
 
     assert!(!f.hook("claude", "session_start").is_empty());
-    assert_eq!(version(&connection), "2");
+    assert_eq!(version(&connection), "3");
     assert!(last_seen(&f, "claude", "SessionStart").is_string());
+}
+
+#[test]
+fn session_metadata_tracks_start_path_turns_and_end_facts_without_reading_transcript() {
+    use rusqlite::OptionalExtension;
+    let f = Fixture::new();
+    f.init_git();
+    f.run(&["adopt"], "");
+    for agent in ["claude", "codex"] {
+        f.hook(agent, "session_start");
+        let source = format!("{agent}:synthetic-{agent}-session");
+        let store =
+            cairn::store::Store::open(f.db(), cairn::store::BusyTimeout::UserCommand).unwrap();
+        let row = || -> Option<(String, String, i64, String, String)> {
+            store.connection().query_row(
+                "SELECT line_path,transcript_path,turns,facts,facts_at FROM sessions WHERE source_id=?1",
+                [&source], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))
+            ).optional().unwrap()
+        };
+        let initial = row();
+        assert!(
+            initial.is_some(),
+            "SessionStart must persist the session metadata"
+        );
+        let initial = initial.unwrap();
+        assert_eq!(initial.0, f.cwd().canonicalize().unwrap().to_str().unwrap());
+        assert!(initial.1.ends_with("never-open-transcript"));
+        assert_eq!(initial.2, 0);
+        store.connection().execute("UPDATE sessions SET failures=2,summarized_bytes=42,summarized_turns=1 WHERE source_id=?1", [&source]).unwrap();
+        fs::write(
+            f.cwd().join(".git/HEAD"),
+            format!("ref: refs/heads/{agent}-next\n"),
+        )
+        .unwrap();
+        let mut prompt = f.payload(agent, "user_prompt_submit");
+        let transcript = f.root.path().join(format!("{agent}-new-transcript"));
+        prompt["transcript_path"] = transcript.to_str().unwrap().into();
+        assert_eq!(f.run(&["hook", agent], &prompt.to_string()), "");
+        assert_eq!(f.run(&["hook", agent], &prompt.to_string()), "");
+        let started = row().unwrap();
+        assert_eq!(started.1, transcript.to_str().unwrap());
+        assert_eq!(started.2, 2, "duplicate starts count as observed events");
+        let branch: String = store
+            .connection()
+            .query_row(
+                "SELECT branch FROM sessions WHERE source_id=?1",
+                [&source],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(branch, format!("{agent}-next"));
+        assert_eq!((&started.3, &started.4), (&initial.3, &initial.4));
+        let state: (i64,i64,i64,Option<String>,Option<String>) = store.connection().query_row(
+            "SELECT failures,summarized_bytes,summarized_turns,waiter_id,waiter_beat_at FROM sessions WHERE source_id=?1", [&source],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!(state, (0, 42, 1, None, None));
+        fs::write(f.cwd().join(format!("{agent}-change")), "synthetic").unwrap();
+        let mut stop = f.payload(agent, "stop");
+        stop.as_object_mut().unwrap().remove("transcript_path");
+        assert_eq!(f.run(&["hook", agent], &stop.to_string()), "");
+        let (path, turns, facts, at): (Option<String>, i64, String, String) = store
+            .connection()
+            .query_row(
+                "SELECT transcript_path,turns,facts,facts_at FROM sessions WHERE source_id=?1",
+                [&source],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(path, None, "a hook without a path records NULL");
+        assert_eq!(turns, 2);
+        let facts: Value = serde_json::from_str(&facts).unwrap();
+        assert!(facts["untracked"].as_u64().unwrap() >= 1);
+        assert_eq!(facts["collected_at"], at);
+        let before: String = store
+            .connection()
+            .query_row(
+                "SELECT last_event_at FROM sessions WHERE source_id=?1",
+                [&source],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(f.hook(agent, "session_end"), "");
+        let after: String = store
+            .connection()
+            .query_row(
+                "SELECT last_event_at FROM sessions WHERE source_id=?1",
+                [&source],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "SessionEnd only writes its event and hook_seen"
+        );
+        assert!(!transcript.exists());
+    }
+}
+
+#[test]
+fn stop_keeps_previous_git_facts_when_collection_fails_and_still_updates_path() {
+    let f = Fixture::new();
+    f.init_git();
+    f.run(&["adopt"], "");
+    f.hook("codex", "session_start");
+    let store = cairn::store::Store::open(f.db(), cairn::store::BusyTimeout::UserCommand).unwrap();
+    let snapshot = || -> (String, String, Option<String>) {
+        store
+            .connection()
+            .query_row("SELECT facts,facts_at,branch FROM sessions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap()
+    };
+    let before = snapshot();
+    let bin = f.root.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let git = bin.join("git");
+    fs::write(&git, "#!/bin/sh\ncase \"$*\" in *'status --porcelain'*) exit 1;; esac\nexec /usr/bin/git \"$@\"\n").unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+    std::env::set_var("PATH", &bin);
+    let mut payload = f.payload("codex", "stop");
+    payload["transcript_path"] = f.root.path().join("after-failure").to_str().unwrap().into();
+    assert_eq!(f.run(&["hook", "codex"], &payload.to_string()), "");
+    assert_eq!(snapshot(), before);
+    let path: String = store
+        .connection()
+        .query_row("SELECT transcript_path FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert!(path.ends_with("after-failure"));
+    assert!(f.log().contains("codex Stop git"));
 }

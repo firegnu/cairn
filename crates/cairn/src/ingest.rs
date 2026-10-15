@@ -289,13 +289,27 @@ fn collect_one(
     } else {
         let payload = payload.as_ref().unwrap();
         let record_id = if let Some(body) = &payload.body {
+            let previous = crate::render::records(tx, payload.project_key.to_str().unwrap())?
+                .into_iter()
+                .find(|record| {
+                    record.kind == "checkpoint"
+                        && record.visible()
+                        && record.source == source
+                        && std::path::Path::new(&record.line) == payload.line_path
+                });
             let facts = payload
                 .facts
                 .as_ref()
                 .map(|facts| serde_json::to_string(facts).expect("facts contain only JSON values"));
-            tx.execute("INSERT INTO records(id, project_id, line_path, branch, source_id, kind, body, facts, created_at)
-                VALUES (?1,?2,?3,?4,?5,'checkpoint',?6,?7,?8)",
+            tx.execute("INSERT INTO records(id, project_id, line_path, branch, source_id, kind, body, facts, created_at, written_by)
+                VALUES (?1,?2,?3,?4,?5,'checkpoint',?6,?7,?8,'save')",
                 params![id, project_id, payload.line_path.to_str().unwrap(), payload.branch, source, body, facts, at])?;
+            if let Some(previous) = previous {
+                tx.execute(
+                    "INSERT INTO supersessions(record_id,target_id) VALUES (?1,?2)",
+                    params![id, previous.id],
+                )?;
+            }
             for target in &payload.supersedes {
                 tx.execute(
                     "INSERT OR IGNORE INTO supersessions(record_id,target_id) VALUES (?1,?2)",

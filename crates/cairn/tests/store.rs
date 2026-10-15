@@ -78,7 +78,7 @@ fn migration_is_idempotent_and_preserves_data() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "2");
+    assert_eq!(version, "3");
     let tables: Vec<String> = store
         .connection()
         .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
@@ -97,6 +97,7 @@ fn migration_is_idempotent_and_preserves_data() {
             "meta",
             "projects",
             "records",
+            "sessions",
             "sources",
             "spool_ops",
             "supersessions",
@@ -159,7 +160,7 @@ fn newer_schema_is_rejected_without_changing_the_database() {
     connection
         .execute_batch(
             "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        INSERT INTO meta VALUES ('schema_version', '3');
+        INSERT INTO meta VALUES ('schema_version', '4');
         CREATE TABLE future_data (value TEXT);
         INSERT INTO future_data VALUES ('synthetic future data');",
         )
@@ -170,7 +171,7 @@ fn newer_schema_is_rejected_without_changing_the_database() {
     let before = fs::read(&path).unwrap();
     assert!(matches!(
         Store::open(&path, BusyTimeout::Hook),
-        Err(Error::NewerSchema { found: 3 })
+        Err(Error::NewerSchema { found: 4 })
     ));
     assert!(
         fs::read(&path).unwrap() == before,
@@ -402,7 +403,7 @@ fn newer_version_in_wal_is_rejected_by_both_open_modes_without_rewriting_data() 
         .connection()
         .execute_batch(
             "PRAGMA wal_checkpoint(TRUNCATE);
-        UPDATE meta SET value = '3' WHERE key = 'schema_version';
+        UPDATE meta SET value = '4' WHERE key = 'schema_version';
         CREATE TABLE future_data (value TEXT);
         INSERT INTO future_data VALUES ('synthetic WAL-only data');",
         )
@@ -411,11 +412,11 @@ fn newer_version_in_wal_is_rejected_by_both_open_modes_without_rewriting_data() 
     let wal_before = fs::read(sidecar(&path, "-wal")).unwrap();
     assert!(matches!(
         Store::open(&path, BusyTimeout::Hook),
-        Err(Error::NewerSchema { found: 3 })
+        Err(Error::NewerSchema { found: 4 })
     ));
     assert!(matches!(
         Store::open_read_only(&path, BusyTimeout::Hook),
-        Err(Error::NewerSchema { found: 3 })
+        Err(Error::NewerSchema { found: 4 })
     ));
     assert!(fs::read(&path).unwrap() == db_before, "future DB changed");
     assert!(
@@ -620,7 +621,7 @@ fn preflight_rejects_closed_wide_future_wal_without_creating_sidecars() {
     writer
         .connection()
         .execute(
-            "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+            "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
             [],
         )
         .unwrap();
@@ -692,7 +693,7 @@ fn concurrent_first_open_leaves_a_complete_database_after_success_or_busy() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(version, "2");
+    assert_eq!(version, "3");
     let tables: i64 = store
         .connection()
         .query_row(
@@ -701,7 +702,7 @@ fn concurrent_first_open_leaves_a_complete_database_after_success_or_busy() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(tables, 11);
+    assert_eq!(tables, 12);
 }
 
 /// A database as cairn 0.1.0 left it: the frozen version 1 schema and a little data.
@@ -759,17 +760,20 @@ fn version_1_database_reads_as_it_is_and_a_writable_open_upgrades_it_keeping_its
     assert_eq!(stored_version(&path), "1");
     assert_eq!(schema(&Connection::open(&path).unwrap()), before);
 
-    // Writing upgrades once: version 2 adds hook_seen and touches nothing else.
+    // Writing upgrades once: hook_seen, written_by and sessions are added.
     let store = Store::open(&path, BusyTimeout::UserCommand).unwrap();
-    assert_eq!(stored_version(&path), "2");
+    assert_eq!(stored_version(&path), "3");
     let after = schema(store.connection());
     let added: Vec<_> = after
         .iter()
         .filter(|entry| !before.contains(entry))
         .map(|(name, _)| name.as_str())
         .collect();
-    assert_eq!(added, ["hook_seen"]);
-    assert!(before.iter().all(|entry| after.contains(entry)));
+    assert_eq!(added, ["hook_seen", "records", "sessions"]);
+    assert!(before
+        .iter()
+        .filter(|(name, _)| name != "records")
+        .all(|entry| after.contains(entry)));
     let kept: (i64, i64, i64) = store
         .connection()
         .query_row(
@@ -785,7 +789,7 @@ fn version_1_database_reads_as_it_is_and_a_writable_open_upgrades_it_keeping_its
     // And a second writable open changes nothing more.
     let again = Store::open(&path, BusyTimeout::Hook).unwrap();
     assert_eq!(schema(again.connection()), after);
-    assert_eq!(stored_version(&path), "2");
+    assert_eq!(stored_version(&path), "3");
 }
 
 #[test]
@@ -851,7 +855,7 @@ fn concurrent_upgrade_of_a_version_1_database_adds_hook_seen_once_and_keeps_its_
         }
     }
     let store = Store::open(&path, BusyTimeout::UserCommand).unwrap();
-    assert_eq!(stored_version(&path), "2");
+    assert_eq!(stored_version(&path), "3");
     let counts: (i64, i64, i64, String) = store
         .connection()
         .query_row(
@@ -908,7 +912,7 @@ fn failed_upgrade_leaves_a_version_1_database_as_it_was_and_a_later_open_upgrade
         .execute_batch("DROP TRIGGER synthetic_failure")
         .unwrap();
     let store = Store::open(&path, BusyTimeout::Hook).unwrap();
-    assert_eq!(stored_version(&path), "2");
+    assert_eq!(stored_version(&path), "3");
     assert_eq!(body(store.connection()), kept);
     let tables: i64 = store
         .connection()
@@ -919,4 +923,145 @@ fn failed_upgrade_leaves_a_version_1_database_as_it_was_and_a_later_open_upgrade
         )
         .unwrap();
     assert_eq!(tables, 1);
+}
+
+fn version_2_database(path: &Path) {
+    version_1_database(path);
+    Connection::open(path).unwrap().execute_batch(
+        "CREATE TABLE hook_seen (
+            project_id INTEGER NOT NULL REFERENCES projects(id),
+            agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
+            event TEXT NOT NULL CHECK (event IN ('SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd')),
+            at TEXT NOT NULL, PRIMARY KEY (project_id, agent, event));
+        UPDATE meta SET value='2' WHERE key='schema_version';
+        INSERT INTO sources VALUES ('claude:synthetic','claude','synthetic','hook','a','b');
+        INSERT INTO records(id,project_id,line_path,source_id,kind,body,created_at)
+            VALUES ('old',1,'/synthetic','claude:synthetic','checkpoint','old body','a'),
+                   ('new',1,'/synthetic','claude:synthetic','checkpoint','new body','b');
+        INSERT INTO supersessions VALUES ('new','old');
+        INSERT INTO injections VALUES ('claude:synthetic','old','a');
+        INSERT INTO confirmations(source_id,kind,op_id,record_id,at)
+            VALUES ('claude:synthetic','saved','new','new','b');
+        INSERT INTO turn_decisions VALUES ('claude:synthetic','turn','confirmed','b');
+        INSERT INTO spool_ops VALUES ('new','ingested','claude:synthetic','new',NULL,'b');
+        INSERT INTO hook_seen VALUES (1,'claude','Stop','b');"
+    ).unwrap();
+}
+
+fn legacy_rows(connection: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    ["projects", "sources", "records", "supersessions", "injections", "confirmations",
+        "turn_decisions", "events", "spool_ops", "hook_seen"].iter().map(|table| {
+        let columns = if *table == "records" {
+            "rowid,id,project_id,line_path,branch,source_id,kind,target_id,body,facts,created_at,deleted_at"
+        } else { "rowid,*" };
+        let mut query = connection.prepare(&format!("SELECT {columns} FROM {table} ORDER BY rowid")).unwrap();
+        let n = query.column_count();
+        query.query_map([], |row| (0..n).map(|i| row.get(i)).collect()).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap()
+    }).collect()
+}
+
+#[test]
+fn version_2_reads_unchanged_then_upgrades_once_preserving_every_legacy_row() {
+    let root = tempdir().unwrap();
+    let path = isolated_path(root.path());
+    version_2_database(&path);
+    let original = Connection::open(&path).unwrap();
+    let before = schema(&original);
+    let rows = legacy_rows(&original);
+    let reader = Store::open_read_only(&path, BusyTimeout::Hook)
+        .unwrap()
+        .unwrap();
+    assert_eq!(schema(reader.connection()), before);
+    assert_eq!(legacy_rows(reader.connection()), rows);
+    assert_eq!(stored_version(&path), "2");
+    drop(reader);
+    let store = Store::open(&path, BusyTimeout::Hook).unwrap();
+    assert_eq!(stored_version(&path), "3");
+    assert_eq!(legacy_rows(store.connection()), rows);
+    let writers: Vec<String> = store
+        .connection()
+        .prepare("SELECT written_by FROM records ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(writers, ["save", "save"]);
+    let columns: Vec<String> = store
+        .connection()
+        .prepare("SELECT name FROM pragma_table_info('sessions')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        [
+            "source_id",
+            "project_id",
+            "line_path",
+            "branch",
+            "transcript_path",
+            "turns",
+            "last_event_at",
+            "facts",
+            "facts_at",
+            "summarized_bytes",
+            "summarized_turns",
+            "summary_record_id",
+            "waiter_id",
+            "waiter_beat_at",
+            "failures",
+            "last_failure_at",
+            "last_failure"
+        ]
+    );
+    let after = schema(store.connection());
+    drop(store);
+    let again = Store::open(&path, BusyTimeout::Hook).unwrap();
+    assert_eq!(schema(again.connection()), after);
+    assert_eq!(legacy_rows(again.connection()), rows);
+}
+
+#[test]
+fn version_2_concurrent_upgrade_preserves_rows_and_adds_version_3_once() {
+    let root = tempdir().unwrap();
+    let path = isolated_path(root.path());
+    version_2_database(&path);
+    let before = legacy_rows(&Connection::open(&path).unwrap());
+    let barrier = std::sync::Barrier::new(3);
+    let results = std::thread::scope(|scope| {
+        let open = || {
+            barrier.wait();
+            Store::open(&path, BusyTimeout::Hook).map(drop)
+        };
+        let a = scope.spawn(open);
+        let b = scope.spawn(open);
+        barrier.wait();
+        [a.join().unwrap(), b.join().unwrap()]
+    });
+    assert!(results.iter().any(Result::is_ok), "{results:?}");
+    for result in results {
+        if let Err(error) = result {
+            assert!(
+                matches!(error, Error::Sqlite(ref e)
+                if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)),
+                "{error}"
+            );
+        }
+    }
+    let store = Store::open(&path, BusyTimeout::Hook).unwrap();
+    assert_eq!(stored_version(&path), "3");
+    assert_eq!(legacy_rows(store.connection()), before);
+    let columns: i64 = store
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('records') WHERE name='written_by'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 1);
 }
