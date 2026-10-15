@@ -5,9 +5,14 @@
 //! extracted from messages (not reasoning, images, or metadata). Claude tools
 //! are content blocks; Codex tools are custom/function call records. Codex
 //! `event_msg.item_completed.CommandExecution` also contributes its command
-//! and result, with `unknown` when no ID is present. Other event mirrors are
-//! skipped. Command events and response records are both retained: their IDs
+//! and result, with `unknown` when no ID is present; `AgentMessage` contributes
+//! its `Text` blocks. Other event mirrors are skipped. Completed events and
+//! response records are both retained: their IDs
 //! need not match, so this parser does not guess which results are duplicates.
+//! Codex user `input_text` blocks matching the observed complete AGENTS.md
+//! instruction wrapper or environment wrapper (beginning with a cwd field)
+//! are excluded, including from the dialogue check. Ordinary mentions and
+//! incomplete wrappers remain user text; this is structural recognition only.
 //!
 //! Tool arguments/results retain at most 500 Unicode scalar values, including
 //! a trailing `…` when shortened. The total UTF-8 budget includes labels and
@@ -18,7 +23,9 @@
 //! `from` is a byte offset at a record boundary, normally a previous
 //! `end_offset`. Reads stop at the length observed on the opened file. A valid
 //! final JSON value is consumed even without a newline; an invalid final line
-//! is left unread, including its newline if any. Error line numbers start at
+//! is left unread, including its newline if any. On resume, a single LF/CRLF
+//! added after an already consumed unterminated record is consumed too;
+//! blank records at other boundaries still fail. Error line numbers start at
 //! one within the requested segment. At least one nonblank user/assistant
 //! text block in that segment is required; tool output alone is insufficient.
 
@@ -84,6 +91,14 @@ pub fn extract(agent: Agent, path: &Path, from: u64) -> Result<Excerpt, Error> {
     let length = metadata.len();
     let restarted = length < from;
     let from = if restarted { 0 } else { from };
+    let after_unterminated_record = if from > 0 {
+        file.seek(SeekFrom::Start(from - 1))?;
+        let mut previous = [0];
+        file.read_exact(&mut previous)?;
+        previous[0] != b'\n'
+    } else {
+        false
+    };
     file.seek(SeekFrom::Start(from))?;
     let mut reader = BufReader::new(file.take(length.saturating_sub(from)));
     let mut output = Output::default();
@@ -97,6 +112,13 @@ pub fn extract(agent: Agent, path: &Path, from: u64) -> Result<Excerpt, Error> {
             break;
         }
         line_number += 1;
+        if line_number == 1
+            && after_unterminated_record
+            && matches!(line.as_slice(), b"\n" | b"\r\n")
+        {
+            end_offset += read as u64;
+            continue;
+        }
         let value = match serde_json::from_slice(&line) {
             Ok(value) => value,
             Err(_) if reader.fill_buf()?.is_empty() => break,
@@ -250,6 +272,8 @@ fn codex(value: &Value, output: &mut Output) {
             if let Some(text) = item["aggregated_output"].as_str() {
                 output.result(id, text);
             }
+        } else if item["type"] == "AgentMessage" {
+            output.dialogue("assistant", &text_blocks(&item["content"], &["Text"]));
         }
         return;
     }
@@ -259,10 +283,7 @@ fn codex(value: &Value, output: &mut Output) {
     match payload["type"].as_str() {
         Some("message") => {
             if let Some(role @ ("user" | "assistant")) = payload["role"].as_str() {
-                output.dialogue(
-                    role,
-                    &text_blocks(&payload["content"], &["input_text", "output_text"]),
-                );
+                output.dialogue(role, &codex_message_text(role, &payload["content"]));
             }
         }
         Some(kind @ ("custom_tool_call" | "function_call")) => {
@@ -286,4 +307,43 @@ fn codex(value: &Value, output: &mut Output) {
         }
         _ => {}
     }
+}
+
+fn codex_message_text(role: &str, content: &Value) -> String {
+    let Some(blocks) = content.as_array() else {
+        return text_blocks(content, &["input_text", "output_text"]);
+    };
+    blocks
+        .iter()
+        .filter(|block| matches!(block["type"].as_str(), Some("input_text" | "output_text")))
+        .filter(|block| role != "user" || !codex_injected_context(block))
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn codex_injected_context(block: &Value) -> bool {
+    if block["type"] != "input_text" {
+        return false;
+    }
+    let Some(text) = block["text"].as_str() else {
+        return false;
+    };
+    if let Some((path, instructions)) = text
+        .strip_prefix("# AGENTS.md instructions for ")
+        .and_then(|rest| rest.split_once("\n\n<INSTRUCTIONS>\n"))
+    {
+        return !path.is_empty()
+            && !path.contains('\n')
+            && instructions.ends_with("\n</INSTRUCTIONS>");
+    }
+    if let Some((cwd, environment)) = text
+        .strip_prefix("<environment_context>\n  <cwd>")
+        .and_then(|rest| rest.split_once("</cwd>\n"))
+    {
+        return !cwd.is_empty()
+            && !cwd.contains('\n')
+            && environment.ends_with("\n</environment_context>");
+    }
+    false
 }

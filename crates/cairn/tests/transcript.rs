@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 
 use cairn::transcript::{extract, Error};
 use cairn::turn::Agent;
@@ -7,6 +8,7 @@ use tempfile::TempDir;
 
 const CLAUDE: &str = include_str!("fixtures/transcripts/claude.jsonl");
 const CODEX: &str = include_str!("fixtures/transcripts/codex.jsonl");
+const CODEX_CONTEXT: &str = include_str!("fixtures/transcripts/codex-context.jsonl");
 
 fn message(agent: Agent, role: &str, text: &str) -> String {
     let value = match agent {
@@ -86,6 +88,47 @@ fn resumes_at_byte_offset_and_leaves_partial_last_line_for_next_read() {
         assert_eq!(resumed.text, "assistant: 新增答案\n");
         assert_eq!(resumed.end_offset, fs::metadata(&path).unwrap().len());
         assert!(!resumed.restarted);
+    }
+}
+
+#[test]
+fn resumes_after_a_consumed_final_json_gets_its_newline() {
+    for agent in [Agent::Claude, Agent::Codex] {
+        for separator in ["\n", "\r\n"] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("transcript.jsonl");
+            let first = message(agent, "user", "问题");
+            fs::write(&path, first.trim_end()).unwrap();
+            let excerpt = extract(agent, &path, 0).unwrap();
+            assert_eq!(excerpt.text, "user: 问题\n");
+            assert_eq!(excerpt.end_offset, (first.len() - 1) as u64);
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            write!(file, "{separator}{}", message(agent, "assistant", "回答")).unwrap();
+            let resumed = extract(agent, &path, excerpt.end_offset).unwrap();
+            assert_eq!(resumed.text, "assistant: 回答\n");
+            assert_eq!(resumed.end_offset, fs::metadata(&path).unwrap().len());
+            assert!(!resumed.restarted);
+        }
+    }
+}
+
+#[test]
+fn blank_record_at_normal_resume_boundary_or_after_late_separator_still_errors() {
+    for agent in [Agent::Claude, Agent::Codex] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("transcript.jsonl");
+        let first = message(agent, "user", "问题");
+        let second = message(agent, "assistant", "回答");
+        fs::write(&path, format!("{first}\n{second}")).unwrap();
+        assert!(matches!(
+            extract(agent, &path, first.len() as u64),
+            Err(Error::InvalidJson { line: 1 })
+        ));
+        // Only the first newline belongs to the already consumed JSON.
+        assert!(matches!(
+            extract(agent, &path, (first.len() - 1) as u64),
+            Err(Error::InvalidJson { line: 2 })
+        ));
     }
 }
 
@@ -278,6 +321,85 @@ fn codex_completed_command_without_response_output_is_shortened_and_not_dialogue
         excerpt.text,
         format!("user: 检查\ntool_result [unknown]: {}…\n", "结".repeat(499))
     );
+}
+
+#[test]
+fn codex_assistant_completed_event_preserves_text_without_a_response_record() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    let event = json!({"type":"event_msg","payload":{"type":"item_completed","item":{
+        "type":"AgentMessage","id":"message-1","content":[
+            {"type":"Text","text":"事件中的回答"},
+            {"type":"Image","text":"非文本块不抽取"}
+        ]
+    }}});
+    for prefix in [String::new(), message(Agent::Codex, "user", "问题")] {
+        fs::write(&path, format!("{prefix}{event}\n")).unwrap();
+        let excerpt = extract(Agent::Codex, &path, 0).unwrap();
+        let expected = if prefix.is_empty() {
+            "assistant: 事件中的回答\n"
+        } else {
+            "user: 问题\nassistant: 事件中的回答\n"
+        };
+        assert_eq!(excerpt.text, expected);
+        assert_eq!(excerpt.end_offset, fs::metadata(&path).unwrap().len());
+
+        // No guaranteed association: preserve both records rather than guess.
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(
+            file,
+            "{}",
+            message(Agent::Codex, "assistant", "事件中的回答")
+        )
+        .unwrap();
+        let both = extract(Agent::Codex, &path, 0).unwrap();
+        assert_eq!(both.text, format!("{expected}assistant: 事件中的回答\n"));
+        assert_eq!(both.end_offset, fs::metadata(&path).unwrap().len());
+    }
+}
+
+#[test]
+fn codex_injected_context_is_not_dialogue_and_does_not_hide_normal_user_text() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    fs::write(&path, CODEX_CONTEXT).unwrap();
+    assert!(matches!(
+        extract(Agent::Codex, &path, 0),
+        Err(Error::NoDialogue)
+    ));
+
+    let normal = "请检查 AGENTS.md 和 <environment_context>，保留我的原话。";
+    fs::write(
+        &path,
+        format!("{CODEX_CONTEXT}{}", message(Agent::Codex, "user", normal)),
+    )
+    .unwrap();
+    let excerpt = extract(Agent::Codex, &path, 0).unwrap();
+    assert_eq!(excerpt.text, format!("user: {normal}\n"));
+    assert_eq!(excerpt.end_offset, fs::metadata(&path).unwrap().len());
+
+    // Filter only matching input_text blocks, not the entire user message.
+    let mut mixed: serde_json::Value = serde_json::from_str(CODEX_CONTEXT).unwrap();
+    mixed["payload"]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"input_text","text":normal}));
+    fs::write(&path, format!("{mixed}\n")).unwrap();
+    assert_eq!(
+        extract(Agent::Codex, &path, 0).unwrap().text,
+        format!("user: {normal}\n")
+    );
+
+    for text in [
+        "# AGENTS.md instructions for /synthetic/project\n请解释这个标题",
+        "<environment_context>\n这是我举的例子\n</environment_context>",
+        "示例：# AGENTS.md instructions for /synthetic/project\n\n<INSTRUCTIONS>\nquoted\n</INSTRUCTIONS>",
+    ] {
+        let user = json!({"type":"response_item","payload":{"type":"message","role":"user",
+            "content":[{"type":"input_text","text":text}]}});
+        fs::write(&path, format!("{user}\n")).unwrap();
+        assert_eq!(extract(Agent::Codex, &path, 0).unwrap().text, format!("user: {text}\n"));
+    }
 }
 
 #[test]
