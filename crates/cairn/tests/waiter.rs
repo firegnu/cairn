@@ -23,11 +23,15 @@ impl Fixture {
             f.path("bin/codex"),
             r#"#!/bin/sh
 set -eu
+input=$(cat)
+while [ "$1" != -o ]; do shift; done
+case "$input" in *'你在为一个软件项目维护"项目的账"'*)
+    printf 'NO_CHANGES\n' > "$2"
+    exit 0 ;;
+esac
 echo $$ > "$WAITER_TEST_ROOT/model-pid"
 /bin/ps -o ppid= -p $$ > "$WAITER_TEST_ROOT/waiter-pid"
-cat >/dev/null
 while [ ! -e "$WAITER_TEST_ROOT/release" ]; do /bin/sleep 0.01; done
-while [ "$1" != -o ]; do shift; done
 printf '## 停点\nbackground-summary\n' > "$2"
 "#,
         )

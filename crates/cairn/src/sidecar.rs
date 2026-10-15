@@ -150,7 +150,7 @@ pub(crate) fn pending_sessions(
 ) -> Result<Vec<String>> {
     Ok(sessions(connection, Some(scope), None)?
         .into_iter()
-        .filter(|s| s.source != exclude && needs_summary(s))
+        .filter(|s| s.source != exclude && (needs_summary(s, true) || needs_ledger(s, true)))
         .map(|s| s.source)
         .collect())
 }
@@ -308,6 +308,8 @@ struct Session {
     last_event: String,
     event_id: i64,
     failures: i64,
+    ledger_bytes: i64,
+    ledger_failures: i64,
 }
 
 fn sessions(
@@ -318,7 +320,7 @@ fn sessions(
     let mut query = connection.prepare(
         "SELECT s.source_id,s.project_id,p.key,s.line_path,s.branch,o.agent,s.transcript_path,
          s.turns,s.summarized_bytes,s.summary_record_id,s.facts,s.last_event_at,
-         COALESCE((SELECT MAX(id) FROM events WHERE source_id=s.source_id),0),s.failures
+         COALESCE((SELECT MAX(id) FROM events WHERE source_id=s.source_id),0),s.failures,s.ledger_bytes,s.ledger_failures
          FROM sessions s JOIN projects p ON p.id=s.project_id JOIN sources o ON o.id=s.source_id
          WHERE (?1 IS NULL OR (p.key=?1 AND s.line_path=?2)) AND p.adopted=1 AND s.transcript_path IS NOT NULL AND s.turns>0
          AND (?3 IS NULL OR s.source_id=?3)
@@ -346,6 +348,8 @@ fn sessions(
                 last_event: r.get(11)?,
                 event_id: r.get(12)?,
                 failures: r.get(13)?,
+                ledger_bytes: r.get(14)?,
+                ledger_failures: r.get(15)?,
             })
         },
     )?;
@@ -380,22 +384,11 @@ fn summarize_with_timing(
             lease.release(store.connection())?;
             continue;
         };
-        if (session.summary.is_some() || session.bytes > 0)
-            && fs::metadata(&session.path).is_ok_and(|m| m.len() <= session.bytes as u64)
-        {
-            lease.release(store.connection())?;
-            continue;
-        }
-        match write_summary(store, &session, root, &lease, timing, false) {
-            Ok((Some(id), _)) => output.push(format!("{}：写成了 {id}", session.source)),
-            Ok((None, _)) => output.push(format!("{}：不用写", session.source)),
-            Err(error) => {
-                let reason = error.to_string();
-                failed_summary(store, &session, &lease, &reason, false)?;
-                output.push(format!("{}：没写成：{reason}", session.source));
-                failed = true;
-            }
-        }
+        let (lines, session_failed) =
+            process_session(store, &session, root, &lease, timing, false)?;
+        output.extend(lines);
+        failed |= session_failed;
+        finish_session(store, &session, &lease, false)?;
     }
     if failed {
         return Err(SummaryFailures {
@@ -427,7 +420,7 @@ fn wait_with_timing(store: &mut Store, source: &str, root: &Path, timing: Timing
             tx.commit()?;
             return Ok(());
         };
-        if !needs_summary(&session) {
+        if !needs_summary(&session, true) && !needs_ledger(&session, true) {
             lease.release(&tx)?;
             tx.commit()?;
             return Ok(());
@@ -453,10 +446,8 @@ fn wait_with_timing(store: &mut Store, source: &str, root: &Path, timing: Timing
             .is_ok_and(|elapsed| elapsed >= timing.quiet);
         tx.commit()?;
         if triggered || quiet {
-            let keep_waiting = match write_summary(store, &session, root, &lease, timing, true) {
-                Ok((_, keep)) => keep,
-                Err(error) => failed_summary(store, &session, &lease, &error.to_string(), true)?,
-            };
+            process_session(store, &session, root, &lease, timing, true)?;
+            let keep_waiting = finish_session(store, &session, &lease, true)?;
             if !keep_waiting {
                 return Ok(());
             }
@@ -465,53 +456,144 @@ fn wait_with_timing(store: &mut Store, source: &str, root: &Path, timing: Timing
     }
 }
 
-fn needs_summary(session: &Session) -> bool {
-    session.failures < 2
+fn needs_summary(session: &Session, automatic: bool) -> bool {
+    (!automatic || session.failures < 2)
         && ((session.summary.is_none() && session.bytes == 0)
             || !fs::metadata(&session.path).is_ok_and(|m| m.len() <= session.bytes as u64))
 }
 
-fn failed_summary(
+fn needs_ledger(session: &Session, automatic: bool) -> bool {
+    (!automatic || session.ledger_failures < 2)
+        && !fs::metadata(&session.path).is_ok_and(|m| m.len() <= session.ledger_bytes as u64)
+}
+
+/// Each stage commits independently; neither outcome prevents the other stage.
+/// The shared lease remains held until both stages finish.
+fn process_session(
+    store: &mut Store,
+    session: &Session,
+    root: &Path,
+    lease: &Lease,
+    timing: Timing,
+    automatic: bool,
+) -> Result<(Vec<String>, bool)> {
+    let mut output = Vec::new();
+    let mut failed = false;
+    if needs_summary(session, automatic) {
+        match write_summary(store, session, root, lease, timing) {
+            Ok(Some(id)) => output.push(format!("{}：写成了 {id}", session.source)),
+            Ok(None) => output.push(format!("{}：不用写", session.source)),
+            Err(error) => {
+                let reason = error.to_string();
+                failed_summary(store, session, lease, &reason)?;
+                output.push(format!("{}：没写成：{reason}", session.source));
+                failed = true;
+            }
+        }
+    }
+    if needs_ledger(session, automatic) {
+        match write_ledger(store, session, root, lease, timing) {
+            Ok(()) => output.push(format!("{}：记账完成", session.source)),
+            Err(error) => {
+                let reason = error.to_string();
+                store.connection().execute(
+                    "UPDATE sessions SET ledger_failures=ledger_failures+1,ledger_last_failure_at=?2,ledger_last_failure=?3 WHERE source_id=?1 AND waiter_id=?4",
+                    params![session.source,crate::save::now(),reason,lease.id])?;
+                output.push(format!("{}：记账没写成：{reason}", session.source));
+                failed = true;
+            }
+        }
+    }
+    Ok((output, failed))
+}
+
+fn failed_summary(store: &mut Store, session: &Session, lease: &Lease, reason: &str) -> Result<()> {
+    store.connection().execute("UPDATE sessions SET failures=failures+1,last_failure_at=?2,last_failure=?3 WHERE source_id=?1 AND waiter_id=?4",
+        params![session.source,crate::save::now(),reason,lease.id])?;
+    Ok(())
+}
+
+/// Check and release atomically after both stages. A Stop hook either precedes
+/// this check, or sees the released lease and starts a new waiter.
+fn finish_session(
     store: &mut Store,
     session: &Session,
     lease: &Lease,
-    reason: &str,
     background: bool,
 ) -> Result<bool> {
     let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
-    let updated = tx.execute("UPDATE sessions SET failures=failures+1,last_failure_at=?2,last_failure=?3 WHERE source_id=?1 AND waiter_id=?4",
-        params![session.source,crate::save::now(),reason,lease.id])?;
-    if updated == 0 {
-        return Ok(false);
-    }
-    let keep = finish_summary(&tx, session, lease, background)?;
-    tx.commit()?;
-    Ok(keep)
-}
-
-/// Check and release in the same write transaction as the result. A Stop hook
-/// either precedes this check, or sees the released lease and starts a new waiter.
-fn finish_summary(
-    connection: &Connection,
-    session: &Session,
-    lease: &Lease,
-    background: bool,
-) -> Result<bool> {
-    let changed: bool = background
-        && connection.query_row(
+    let owned = lease.heartbeat(&tx, Utc::now())?;
+    let changed: bool = owned
+        && background
+        && tx.query_row(
             "SELECT last_event_at<>?2 OR EXISTS(SELECT 1 FROM events WHERE source_id=?1 AND id>?3)
          FROM sessions WHERE source_id=?1",
             params![session.source, session.last_event, session.event_id],
             |r| r.get(0),
         )?;
     if !changed {
-        lease.release(connection)?;
+        lease.release(&tx)?;
     }
+    tx.commit()?;
     Ok(changed)
 }
 
+fn write_ledger(
+    store: &mut Store,
+    session: &Session,
+    root: &Path,
+    lease: &Lease,
+    timing: Timing,
+) -> Result<()> {
+    use crate::ledger::sidecar::{apply, parse, prompt, OUTPUT_LIMIT};
+    if !lease.heartbeat(store.connection(), Utc::now())? {
+        return Err("会话占位已失效".into());
+    }
+    let agent = match session.agent.as_str() {
+        "claude" => Agent::Claude,
+        "codex" => Agent::Codex,
+        _ => return Err("会话类型不支持".into()),
+    };
+    let excerpt = crate::transcript::extract(agent, &session.path, session.ledger_bytes as u64)
+        .map_err(|error| format!("会话记录读不了或解析不了：{error}"))?;
+    for _ in 0..2 {
+        // Version and items must come from one read snapshot, with no transaction
+        // held while the model runs. Retry uses the same uncommitted excerpt.
+        let tx = store.transaction(rusqlite::TransactionBehavior::Deferred)?;
+        let ledger = crate::ledger::read(&tx, &session.project_key, false)?;
+        tx.commit()?;
+        let output = generate(
+            store.connection(),
+            root,
+            &prompt(&ledger, &excerpt.text),
+            lease,
+            timing,
+            OUTPUT_LIMIT,
+        )?;
+        let mutations = parse(&output, &ledger)?;
+        let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
+        if !lease.heartbeat(&tx, Utc::now())? {
+            return Err("会话占位已失效".into());
+        }
+        if !apply(
+            &tx,
+            session.project_id,
+            &session.project_key,
+            ledger.version,
+            &mutations,
+            &session.source,
+        )? {
+            continue;
+        }
+        tx.execute("UPDATE sessions SET ledger_bytes=?2,ledger_failures=0,ledger_last_failure=NULL,ledger_last_failure_at=NULL WHERE source_id=?1", params![session.source,excerpt.end_offset as i64])?;
+        tx.commit()?;
+        return Ok(());
+    }
+    Err("账在记的时候被改了".into())
+}
+
 #[derive(Debug, thiserror::Error)]
-#[error("部分会话摘要没写成")]
+#[error("部分会话摘要或记账没写成")]
 pub(crate) struct SummaryFailures {
     pub output: String,
 }
@@ -522,8 +604,7 @@ fn write_summary(
     root: &Path,
     lease: &Lease,
     timing: Timing,
-    background: bool,
-) -> Result<(Option<String>, bool)> {
+) -> Result<Option<String>> {
     if !lease.heartbeat(store.connection(), Utc::now())? {
         return Err("会话占位已失效".into());
     }
@@ -554,7 +635,14 @@ fn write_summary(
         }
     }
     prompt.push_str(&format!("\n会话摘录\n{}", excerpt.text));
-    let body = generate(store.connection(), root, &prompt, lease, timing)?;
+    let body = generate(
+        store.connection(),
+        root,
+        &prompt,
+        lease,
+        timing,
+        crate::save::BODY_LIMIT,
+    )?;
     let skip = body.trim() == "NOTHING_TO_CONTINUE";
     if !skip {
         crate::save::validate_body(&body).map_err(|error| format!("输出不合格：{error}"))?;
@@ -570,9 +658,8 @@ fn write_summary(
     if skip {
         tx.execute("UPDATE sessions SET summarized_bytes=?2,summarized_turns=?3,failures=0,last_failure=NULL,last_failure_at=NULL WHERE source_id=?1",
             params![session.source,excerpt.end_offset as i64,session.turns])?;
-        let keep = finish_summary(&tx, session, lease, background)?;
         tx.commit()?;
-        return Ok((None, keep));
+        return Ok(None);
     }
     let id = ulid::Ulid::new().to_string();
     tx.execute("INSERT INTO records(id,project_id,line_path,branch,source_id,kind,body,facts,created_at,written_by)
@@ -586,9 +673,8 @@ fn write_summary(
     }
     tx.execute("UPDATE sessions SET summarized_bytes=?2,summarized_turns=?3,summary_record_id=?4,failures=0,last_failure=NULL,last_failure_at=NULL WHERE source_id=?1",
         params![session.source,excerpt.end_offset as i64,session.turns,id])?;
-    let keep = finish_summary(&tx, session, lease, background)?;
     tx.commit()?;
-    Ok((Some(id), keep))
+    Ok(Some(id))
 }
 
 fn previous_checkpoint(
@@ -611,6 +697,7 @@ fn generate(
     prompt: &str,
     lease: &Lease,
     timing: Timing,
+    output_limit: usize,
 ) -> Result<String> {
     let started = Instant::now();
     let directory = crate::spool::sidecar_directory(root)?;
@@ -701,7 +788,7 @@ fn generate(
     let mut body = String::new();
     output
         .reopen()?
-        .take((crate::save::BODY_LIMIT + 1) as u64)
+        .take((output_limit + 1) as u64)
         .read_to_string(&mut body)
         .map_err(|_| "输出不合格：无法读取 UTF-8 摘要")?;
     Ok(body)
