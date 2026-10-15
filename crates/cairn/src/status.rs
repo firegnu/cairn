@@ -135,7 +135,10 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
         None
     };
     let codex_available = crate::sidecar::codex_path().is_some();
-    let unsummarized = summaries.iter().filter(|s| s.summary.is_none()).count();
+    let unsummarized = summaries
+        .iter()
+        .filter(|s| s.summary.is_none() && s.turns > s.summarized_turns)
+        .count();
     let last_failure = summaries
         .iter()
         .filter(|s| s.failure.is_some())

@@ -183,7 +183,8 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
     let mut summary_states = Vec::new();
     for session in crate::sidecar::observations(connection, request.scope)? {
         let mut state = String::new();
-        if session.summary.is_none() {
+        let missing = session.summary.is_none() && session.turns > session.summarized_turns;
+        if missing {
             state.push_str(&format!("观测到 {} 个回合，还没有摘要；", session.turns));
         } else if session.turns > session.summarized_turns {
             state.push_str(&format!(
@@ -198,7 +199,7 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
                 "最近一次没写成：{reason}；可重试 `{} summarize`。",
                 request.command
             ));
-        } else if session.summary.is_none() {
+        } else if missing {
             state.push_str(&format!(
                 "{}；可重试 `{} summarize`。",
                 if session.has_path {
