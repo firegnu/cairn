@@ -1,0 +1,1 @@
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /synthetic/project\n\n<INSTRUCTIONS>\nSynthetic project rules.\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/synthetic/project</cwd>\n  <shell>zsh</shell>\n</environment_context>"}]}}

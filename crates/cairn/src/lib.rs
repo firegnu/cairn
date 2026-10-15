@@ -15,4 +15,5 @@ pub mod session;
 pub mod spool;
 mod status;
 pub mod store;
+pub mod transcript;
 pub mod turn;

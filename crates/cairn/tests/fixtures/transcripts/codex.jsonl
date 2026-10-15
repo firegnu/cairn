@@ -1,0 +1,12 @@
+{"type":"session_meta","payload":{"text":"ignored metadata"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"ignored instructions"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"检查合成文件"},{"type":"input_image","image_url":"ignored image"}]}}
+{"type":"event_msg","payload":{"type":"user_message","message":"ignored mirror"}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"ignored reasoning"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"开始检查"}]}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call-1","input":"read fixture.txt"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-1","output":"合成结果"}}
+{"type":"response_item","payload":{"type":"function_call","name":"read","call_id":"call-2","arguments":"{\"path\":\"fixture.txt\"}"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call-2","output":"第二个结果"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"检查完成"}]}}
+{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"exec-3","command":["cat","third.txt"],"status":"completed","aggregated_output":"第三步已执行\n","exit_code":0}}}
