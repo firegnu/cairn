@@ -324,6 +324,7 @@ fn write_summary(
         _ => return Err("会话类型不支持".into()),
     };
     let previous = previous_checkpoint(store.connection(), session)?;
+    let input_previous_id = previous.as_ref().map(|record| record.id.clone());
     let excerpt = crate::transcript::extract(
         agent,
         &session.path,
@@ -352,6 +353,9 @@ fn write_summary(
     }
     let id = ulid::Ulid::new().to_string();
     let previous = previous_checkpoint(&tx, session)?;
+    if previous.as_ref().map(|record| record.id.as_str()) != input_previous_id.as_deref() {
+        return Err("生成期间上一版变了".into());
+    }
     tx.execute("INSERT INTO records(id,project_id,line_path,branch,source_id,kind,body,facts,created_at,written_by)
         VALUES (?1,?2,?3,?4,?5,'checkpoint',?6,?7,?8,'sidecar')",
         params![id,session.project_id,session.line,session.branch,session.source,body,session.facts,crate::save::now()])?;

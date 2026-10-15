@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -227,10 +228,25 @@ fn summarize_reads_full_transcript_uses_config_and_writes_session_checkpoint() {
 [ "$model" = synthetic-model ]
 [ "$effort" = 'model_reasoning_effort="low"' ]
 case "$input" in *'user: synthetic-first-message'*) ;; *) exit 83 ;; esac
+stat -f '%Lp' .. > "$SIDECAR_TEST_DIR/outer-mode"
 "#,
         "## 停点\nfirst-summary",
     );
-    let text = f.ok(&["summarize"], "");
+    let mut command = f.command(&["summarize"]);
+    // SAFETY: the child callback only changes its own umask using libc.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0);
+            Ok(())
+        });
+    }
+    let output = command.stdin(Stdio::null()).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
     assert!(
         text.contains("claude:one") && text.contains("写成"),
         "{text}"
@@ -252,6 +268,10 @@ case "$input" in *'user: synthetic-first-message'*) ;; *) exit 83 ;; esac
     assert_eq!(records["records"][0]["id"], id);
     assert_eq!(failures, 0);
     assert!(waiter.is_none());
+    assert_eq!(
+        fs::read_to_string(f.path("outer-mode")).unwrap().trim(),
+        "700"
+    );
     let cwd = fs::read_to_string(f.path("cwd")).unwrap();
     assert!(
         !PathBuf::from(cwd).exists(),
@@ -259,6 +279,124 @@ case "$input" in *'user: synthetic-first-message'*) ;; *) exit 83 ;; esac
     );
     assert!(f.ok(&["summarize"], "").contains("没有需要"));
     assert_eq!(f.records(true)["total"], 1);
+}
+
+#[test]
+fn save_during_generation_keeps_its_visibility_and_rejects_stale_summary() {
+    for has_previous in [false, true] {
+        let f = Fixture::new();
+        f.ok(&["adopt"], "");
+        f.session("one", "original-dialogue");
+        if has_previous {
+            f.fake_codex("", "## 停点\nprevious-summary");
+            f.ok(&["summarize"], "");
+            fs::OpenOptions::new()
+                .append(true)
+                .open(f.path("one.jsonl"))
+                .unwrap()
+                .write_all(dialogue("added-dialogue").as_bytes())
+                .unwrap();
+            f.hook("one", "UserPromptSubmit");
+        }
+        let store = f.store();
+        let progress = || {
+            store.connection().query_row(
+            "SELECT summarized_bytes,summarized_turns,summary_record_id FROM sessions WHERE source_id='claude:one'", [],
+            |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,Option<String>>(2)?))).unwrap()
+        };
+        let before = progress();
+        let previous_check = if has_previous {
+            "case \"$input\" in *'上一版摘要'*'previous-summary'*) ;; *) exit 83 ;; esac"
+        } else {
+            "case \"$input\" in *'previous-summary'*) exit 83 ;; esac"
+        };
+        f.fake_codex(
+            &format!(
+                r#"
+{previous_check}
+case "$input" in *'manual-during-generation'*) exit 84 ;; esac
+touch "$SIDECAR_TEST_DIR/ready"
+while [ ! -e "$SIDECAR_TEST_DIR/release" ]; do sleep 0.01; done
+"#
+            ),
+            "## 停点\nsummary-from-old-input",
+        );
+        let mut child = f
+            .command(&["summarize"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Always release and reap the child, even if setup or an assertion fails.
+        let concurrent_save = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !f.path("ready").exists() {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "fake codex exited before the input barrier"
+                );
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "input barrier timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            f.ok(
+                &["save", "--source", "claude:one"],
+                "## 停点\nmanual-during-generation",
+            );
+            f.ok(&["show"], ""); // Ingest while the model holds the old input.
+            let active = f.records(false);
+            assert_eq!(active["records"][0]["summary"], "manual-during-generation");
+            active["records"][0]["id"].as_str().unwrap().to_owned()
+        }));
+        fs::write(f.path("release"), b"").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("summary did not finish after barrier release");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        let manual = concurrent_save.unwrap();
+        let active = f.records(false);
+        assert_eq!(active["total"], 1);
+        assert_eq!(
+            active["records"][0]["id"], manual,
+            "unread manual save was replaced (previous={has_previous})"
+        );
+        assert!(!output.status.success());
+        assert!(String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("生成期间上一版变了"));
+        assert_eq!(progress(), before);
+        let (failures, reason, at, waiter, beat): (i64,String,Option<String>,Option<String>,Option<String>) = store.connection().query_row(
+            "SELECT failures,last_failure,last_failure_at,waiter_id,waiter_beat_at FROM sessions WHERE source_id='claude:one'", [],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!(failures, 1);
+        assert_eq!(reason, "生成期间上一版变了");
+        assert!(at.is_some() && waiter.is_none() && beat.is_none());
+        assert!(!f.records(true)["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["summary"] == "summary-from-old-input"));
+        f.fake_codex(
+            r#"
+case "$input" in *'上一版摘要'*'manual-during-generation'*) ;; *) exit 85 ;; esac
+"#,
+            "## 停点\nsummary-after-retry",
+        );
+        f.ok(&["summarize"], "");
+        assert_eq!(
+            f.records(false)["records"][0]["summary"],
+            "summary-after-retry"
+        );
+    }
 }
 
 #[test]

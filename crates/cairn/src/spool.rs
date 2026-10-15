@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -67,6 +67,7 @@ pub(crate) fn sidecar_directory(root: &Path) -> Result<tempfile::TempDir> {
     check_directory(&directory, 0o022)?;
     Ok(tempfile::Builder::new()
         .prefix("cairn-sidecar-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(root)?)
 }
 
