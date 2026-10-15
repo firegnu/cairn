@@ -97,3 +97,9 @@
 未读取真实会话、工具记忆或用户数据库，未修改真实配置，未安装程序；未实现会话解析、模型调用、等待进程、补注入、summarize/config 或摘要进度提示。未改 DESIGN、hook 配置定义、安装/卸载实现、并行任务的 transcript 文件或 lib.rs。未合并、未推送，只提交本分支。
 
 没有需要主控裁定的设计矛盾；独立审查与后续集成由主控继续安排。
+
+## 主控审查
+
+2026-10-15，cairn/main。看了 diff：改动在任务书范围内；hook 定义、install 实现、DESIGN、transcript 文件没动；`install.rs` 测试只改了续跑相关的两处断言（Stop 不再 block，提示里只剩一处 save 路径），属于有意去掉的行为。版本 3 的表结构照 §6.2；`list --json`、`show <ID> --json` 加了 `written_by`，其余字段没动。
+测试：主控用单独编译目录重跑 `cargo test --all-targets` 全部通过（cmds 21、hook 14、install 13、render_session 15、save 19、scope_facts 5、store 23、turn 16），clippy 通过。对方说的“全量首跑失败后只补跑剩余套件”与此一致。
+留给交叉审查看：Codex 的 Stop 由 `{}` 改成空输出（§10.2 两种都允许，P1-06 探针的 Codex Stop 也是空输出，会话正常）；TurnStarted 新增一次 Git 调用取分支。
