@@ -34,8 +34,27 @@ impl Fixture {
             std::env::set_var(key, root.path());
         }
         std::env::set_var("PATH", format!("{}:/usr/bin:/bin", root.path().display()));
+        // Existing tests configure summary behavior. Ledger calls are separate
+        // and return NO_CHANGES without running summary-specific barriers.
+        let reads_input = script.contains("cat >/dev/null") || script.contains("input=$(cat)");
+        let routing = if reads_input {
+            r#"
+input=$(cat)
+case "$input" in *'你在为一个软件项目维护"项目的账"'*)
+    while [ "$1" != -o ]; do shift; done
+    printf 'NO_CHANGES\n' > "$2"
+    exit 0 ;;
+esac
+"#
+        } else {
+            ""
+        };
+        let script = script
+            .replace("cat >/dev/null", ":")
+            .replace("input=$(cat)", ":");
         let program = root.path().join("codex");
-        fs::write(&program,format!("#!/bin/sh\nset -eu\nprintf '%s' \"$$\" > \"$SIDECAR_TEST_DIR/pid\"\nprintf '%s' \"$PWD\" > \"$SIDECAR_TEST_DIR/cwd\"\n{script}\n")).unwrap();
+
+        fs::write(&program,format!("#!/bin/sh\nset -eu\n{routing}\nprintf '%s' \"$$\" > \"$SIDECAR_TEST_DIR/pid\"\nprintf '%s' \"$PWD\" > \"$SIDECAR_TEST_DIR/cwd\"\n{script}\n")).unwrap();
         fs::set_permissions(program, fs::Permissions::from_mode(0o700)).unwrap();
         let scope = Scope {
             project_key: root.path().join("project"),
@@ -63,6 +82,17 @@ impl Fixture {
         .unwrap();
         store.connection().execute("INSERT INTO sessions(source_id,project_id,line_path,transcript_path,turns,last_event_at) VALUES ('claude:test',1,?1,?2,1,?3)",
             params![scope.line_path.to_str(),transcript.to_str(),crate::save::now()]).unwrap();
+        if !reads_input {
+            // The pipe-backpressure test intentionally never reads stdin; its
+            // ledger is already caught up, so it still exercises one timeout.
+            store
+                .connection()
+                .execute(
+                    "UPDATE sessions SET ledger_bytes=?1",
+                    [fs::metadata(&transcript).unwrap().len() as i64],
+                )
+                .unwrap();
+        }
         Self {
             root,
             scope,
@@ -623,7 +653,6 @@ stale-summary',?2)",params![f.scope.line_path.to_str(),crate::save::now()]).unwr
         f.root.path(),
         &lease,
         Timing::default(),
-        false,
     )
     .unwrap();
     let records =

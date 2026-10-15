@@ -15,6 +15,7 @@ use std::{
 };
 
 pub(crate) mod context;
+pub(crate) mod sidecar;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Kind {

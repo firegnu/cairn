@@ -200,6 +200,7 @@ impl Observation<'_> {
                 last_event_at=MAX(sessions.last_event_at,excluded.last_event_at),
                 turns=sessions.turns+excluded.turns,
                 failures=CASE WHEN ?6 THEN 0 ELSE sessions.failures END,
+                ledger_failures=CASE WHEN ?6 THEN 0 ELSE sessions.ledger_failures END,
                 facts=CASE WHEN excluded.facts_at>=COALESCE(sessions.facts_at,'') THEN excluded.facts ELSE sessions.facts END,
                 facts_at=CASE WHEN excluded.facts_at>=COALESCE(sessions.facts_at,'') THEN excluded.facts_at ELSE sessions.facts_at END",
             params![self.source, self.scope.project_key.to_str(), self.scope.line_path.to_str(),

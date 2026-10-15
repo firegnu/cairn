@@ -139,6 +139,16 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$ephemeral" = 1 ]
 input=$(cat)
+case "$input" in
+    *'你在为一个软件项目维护"项目的账"'*)
+        if [ -f "$SIDECAR_TEST_DIR/ledger-checks" ]; then . "$SIDECAR_TEST_DIR/ledger-checks"; fi
+        if [ -f "$SIDECAR_TEST_DIR/ledger-output" ]; then
+            cat "$SIDECAR_TEST_DIR/ledger-output" > "$output"
+        else
+            printf 'NO_CHANGES\n' > "$output"
+        fi
+        exit 0 ;;
+esac
 case "$input" in *'不要调用工具'*'不超过 6 KiB'*'会话摘录'*) ;; *) exit 82 ;; esac
 {checks}
 cat > "$output" <<'SUMMARY'
@@ -157,6 +167,20 @@ SUMMARY
             vec!["list", "--json"]
         };
         serde_json::from_str(&self.ok(&args, "")).unwrap()
+    }
+
+    fn fake_ledger(&self, summary: &str, output: &str, checks: &str) {
+        self.fake_codex("", summary);
+        fs::write(self.path("ledger-output"), output).unwrap();
+        fs::write(self.path("ledger-checks"), checks).unwrap();
+    }
+
+    fn ledger(&self) -> Value {
+        serde_json::from_str(&self.ok(&["ledger", "--all", "--json"], "")).unwrap()
+    }
+
+    fn ledger_item(&self, no: &str) -> Value {
+        serde_json::from_str(&self.ok(&["ledger", "show", no, "--json"], "")).unwrap()
     }
 
     fn git(&self, args: &[&str]) {
@@ -975,4 +999,453 @@ case "$input" in *'excluded-content'*) exit 82 ;; esac
     f.ok(&["unadopt"], "");
     assert!(f.ok(&["summarize"], "").contains("没有需要"));
     assert!(!f.path("cwd").exists());
+}
+
+#[test]
+fn ledger_add_edit_close_commit_one_version_with_session_evidence_and_progress() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.ok(&["ledger", "add", "state", "old title"], "old body");
+    f.ok(&["ledger", "add", "open", "pending"], "decide later");
+    f.session("one", "synthetic-ledger-decision");
+    f.fake_ledger(
+        "## 停点\nsummary-still-works",
+        "ADD convention | path \\| rule | first\\nsecond \\\\ literal | original words\nEDIT #1 | new title | new body | changed it\nCLOSE #2 | decided | that is settled",
+        r#"case "$input" in *'当前的账'*'#1'*'state'*'old title'*'old body'*'#2'*'open'*'pending'*'会话摘录'*'user: synthetic-ledger-decision'*) ;; *) exit 83 ;; esac"#,
+    );
+    f.ok(&["summarize"], "");
+    let ledger = f.ledger();
+    assert_eq!(ledger["version"], 3);
+    assert_eq!(ledger["items"].as_array().unwrap().len(), 3);
+    let added = f.ledger_item("3");
+    assert_eq!(added["item"]["title"], "path | rule");
+    assert_eq!(added["item"]["body"], "first\nsecond \\ literal");
+    assert_eq!(added["item"]["created_by"], "claude:one");
+    let edited = f.ledger_item("1");
+    assert_eq!(edited["item"]["title"], "new title");
+    assert_eq!(edited["changes"][0]["before_title"], "old title");
+    assert_eq!(edited["changes"][0]["before_body"], "old body");
+    let closed = f.ledger_item("2");
+    assert_eq!(closed["item"]["status"], "closed");
+    assert_eq!(closed["item"]["close_reason"], "decided");
+    for (item, evidence) in [
+        (&added, "original words"),
+        (&edited, "changed it"),
+        (&closed, "that is settled"),
+    ] {
+        assert_eq!(item["changes"][0]["by"], "claude:one");
+        assert_eq!(item["changes"][0]["evidence"], evidence);
+        assert_eq!(item["changes"][0]["ledger_version"], 3);
+    }
+    let (bytes, failures, cleared): (i64, i64, bool) = f.store().connection().query_row(
+        "SELECT ledger_bytes,ledger_failures,ledger_last_failure IS NULL AND ledger_last_failure_at IS NULL AND waiter_id IS NULL FROM sessions", [],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(
+        bytes as u64,
+        fs::metadata(f.path("one.jsonl")).unwrap().len()
+    );
+    assert_eq!(failures, 0);
+    assert!(cleared);
+    assert_eq!(
+        f.records(false)["records"][0]["summary"],
+        "summary-still-works"
+    );
+}
+
+#[test]
+fn ledger_runs_after_skipped_or_failed_summary_and_uses_its_own_offset() {
+    for (summary, success) in [("NOTHING_TO_CONTINUE", true), ("invalid-summary", false)] {
+        let f = Fixture::new();
+        f.ok(&["adopt"], "");
+        f.ok(&["ledger", "add", "open", "pending"], "");
+        f.session("one", "old-ledger-message");
+        f.fake_ledger(summary, "CLOSE #1 | no longer needed | drop it", "");
+        assert_eq!(f.run(&["summarize"], "").status.success(), success);
+        assert_eq!(f.ledger_item("1")["item"]["status"], "closed");
+        assert_eq!(f.records(true)["total"], 0);
+        let before = f.ledger();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(f.path("one.jsonl"))
+            .unwrap()
+            .write_all(dialogue("new-ledger-message").as_bytes())
+            .unwrap();
+        f.fake_ledger(
+            "NOTHING_TO_CONTINUE",
+            " \nNO_CHANGES\n\t",
+            r#"
+case "$input" in *'当前的账'*'（空）'*'会话摘录'*'user: new-ledger-message'*) ;; *) exit 83 ;; esac
+case "$input" in *'user: old-ledger-message'*|*'#1 open'*) exit 84 ;; esac
+"#,
+        );
+        f.ok(&["summarize"], "");
+        assert_eq!(f.ledger(), before);
+        assert_eq!(f.ledger_item("1")["changes"].as_array().unwrap().len(), 2);
+        let bytes: i64 = f
+            .store()
+            .connection()
+            .query_row("SELECT ledger_bytes FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            bytes as u64,
+            fs::metadata(f.path("one.jsonl")).unwrap().len()
+        );
+        assert!(f.ok(&["summarize"], "").contains("没有需要"));
+    }
+}
+
+#[test]
+fn ledger_invalid_batches_are_discarded_whole_and_failures_stop_only_automatic_attempts() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.ok(&["ledger", "add", "state", "original"], "original body");
+    f.session("one", "private-synthetic-ledger-text");
+    f.hook("one", "SessionEnd");
+    let before = f.ledger();
+    let history = f.ledger_item("1");
+    let invalid = vec![
+        "ADD bogus | title | body | evidence".to_owned(),
+        "EDIT #999 | title | body | evidence".into(),
+        "EDIT #1 | title | body | evidence\nCLOSE #1 | reason | evidence".into(),
+        format!("ADD state | {} | body | evidence", "界".repeat(201)),
+        format!("ADD state | title | {} | evidence", "界".repeat(342)),
+        format!("ADD state | title | body | {}", "界".repeat(501)),
+        "ADD state | title | body | evidence\n".repeat(10), // valid prefix makes eleven
+        "ADD state | title | bad\\q | evidence".into(),
+        "ADD state | title | body | evidence\\".into(),
+        "ADD state | title\\nline | body | evidence".into(),
+        "ADD state | title | body | ".into(),
+        "ADD state | title | body | evidence | extra".into(),
+        "EDIT #+1 | title | body | evidence".into(),
+        "NO_CHANGES".into(), // must not be mixed with the valid prefix
+        "\nADD state | title | body | evidence".into(),
+        "```\nADD state | title | body | evidence\n```".into(),
+    ];
+    for (index, invalid) in invalid.iter().enumerate() {
+        f.fake_ledger(
+            "NOTHING_TO_CONTINUE",
+            &format!("ADD state | must not persist | | evidence\n{invalid}"),
+            "",
+        );
+        let result = f.run(&["summarize"], "");
+        assert!(!result.status.success(), "accepted {invalid}");
+        assert_eq!(f.ledger(), before);
+        assert_eq!(f.ledger_item("1"), history);
+        let (bytes, failures, reason): (i64, i64, String) = f
+            .store()
+            .connection()
+            .query_row(
+                "SELECT ledger_bytes,ledger_failures,ledger_last_failure FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(bytes, 0);
+        assert_eq!(failures, index as i64 + 1);
+        assert_eq!(reason, "输出不合格");
+    }
+    // Reset only fixture state to exercise exactly two automatic failures.
+    f.store()
+        .connection()
+        .execute("UPDATE sessions SET ledger_failures=0", [])
+        .unwrap();
+    let db = f.path("state/cairn/cairn.db");
+    let args = [
+        "__wait",
+        "--database",
+        db.to_str().unwrap(),
+        "--root",
+        f.0.path().to_str().unwrap(),
+        "--source",
+        "claude:one",
+    ];
+    f.fake_ledger(
+        "NOTHING_TO_CONTINUE",
+        "invalid",
+        "touch \"$SIDECAR_TEST_DIR/ledger-called\"",
+    );
+    for failures in [1, 2] {
+        f.ok(&args, "");
+        assert!(f.path("ledger-called").exists());
+        fs::remove_file(f.path("ledger-called")).unwrap();
+        let actual: i64 = f
+            .store()
+            .connection()
+            .query_row("SELECT ledger_failures FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(actual, failures);
+    }
+    f.ok(&args, "");
+    assert!(!f.path("ledger-called").exists());
+    let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+    assert_eq!(status["ledger"]["failed_sessions"], 1);
+    assert!(f.ok(&["show"], "").contains("输出不合格"));
+    f.fake_ledger("NOTHING_TO_CONTINUE", "NO_CHANGES", "");
+    f.ok(&["summarize"], "");
+    assert_eq!(f.ledger(), before);
+    let cleared: bool = f.store().connection().query_row("SELECT ledger_bytes>0 AND ledger_failures=0 AND ledger_last_failure IS NULL AND ledger_last_failure_at IS NULL FROM sessions", [], |r| r.get(0)).unwrap();
+    assert!(cleared);
+}
+
+struct RunningSidecar(std::process::Child);
+
+impl RunningSidecar {
+    fn finish(&mut self) -> Output {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = self.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sidecar did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        use std::io::Read;
+        self.0
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_end(&mut stdout)
+            .unwrap();
+        self.0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_end(&mut stderr)
+            .unwrap();
+        Output {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+}
+
+impl Drop for RunningSidecar {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl Fixture {
+    fn waiter(&self, sid: &str) -> RunningSidecar {
+        RunningSidecar(
+            self.command(&[
+                "__wait",
+                "--database",
+                self.path("state/cairn/cairn.db").to_str().unwrap(),
+                "--root",
+                self.0.path().to_str().unwrap(),
+                "--source",
+                &format!("claude:{sid}"),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+        )
+    }
+
+    fn ready(&self, name: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !self.path(name).exists() {
+            assert!(std::time::Instant::now() < deadline, "missing {name}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn release(&self, name: &str) {
+        fs::write(self.path(name), "").unwrap();
+    }
+}
+
+#[test]
+fn simultaneous_ledger_writers_retry_once_and_record_a_second_version_conflict() {
+    for conflict_again in [false, true] {
+        let f = Fixture::new();
+        f.ok(&["adopt"], "");
+        for sid in ["a", "b"] {
+            f.session(sid, &format!("session-{sid}"));
+            // Seed the trigger directly: this test exercises ledger concurrency,
+            // not the SessionEnd hook's 100 ms Git deadline.
+            f.store()
+                .connection()
+                .execute(
+                    "INSERT INTO events(source_id,kind,at) VALUES (?1,'session_ended',?2)",
+                    rusqlite::params![format!("claude:{sid}"), cairn::save::now()],
+                )
+                .unwrap();
+        }
+        f.fake_ledger(
+            "NOTHING_TO_CONTINUE",
+            "",
+            r#"
+case "$input" in *'user: session-a'*) name=a ;; *) name=b ;; esac
+countfile="$SIDECAR_TEST_DIR/$name-count"
+n=0; if [ -f "$countfile" ]; then n=$(cat "$countfile"); fi
+n=$((n + 1)); printf '%s' "$n" > "$countfile"
+if [ "$name-$n" = a-2 ]; then
+    case "$input" in *'#1 state | b-1 | committed'*) ;; *) exit 83 ;; esac
+fi
+touch "$SIDECAR_TEST_DIR/$name-$n-ready"
+i=0
+while [ ! -e "$SIDECAR_TEST_DIR/$name-$n-release" ]; do
+    i=$((i + 1)); [ "$i" -lt 1000 ]; sleep 0.01
+done
+printf 'ADD state | %s-%s | committed | session evidence\n' "$name" "$n" > "$output"
+exit 0
+"#,
+        );
+        let mut a = f.waiter("a");
+        f.ready("a-1-ready");
+        let mut b = f.waiter("b");
+        f.ready("b-1-ready");
+        f.release("b-1-release");
+        assert!(b.finish().status.success());
+        assert_eq!(f.ledger()["version"], 1);
+        f.release("a-1-release");
+        f.ready("a-2-ready");
+        assert_eq!(f.ledger()["items"].as_array().unwrap().len(), 1);
+        if conflict_again {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(f.path("b.jsonl"))
+                .unwrap()
+                .write_all(dialogue("session-b again").as_bytes())
+                .unwrap();
+            f.hook("b", "UserPromptSubmit");
+            f.store()
+                .connection()
+                .execute(
+                    "INSERT INTO events(source_id,kind,at) VALUES ('claude:b','session_ended',?1)",
+                    [cairn::save::now()],
+                )
+                .unwrap();
+            let mut b = f.waiter("b");
+            f.ready("b-2-ready");
+            f.release("b-2-release");
+            assert!(b.finish().status.success());
+        }
+        f.release("a-2-release");
+        assert!(a.finish().status.success());
+        assert_eq!(fs::read_to_string(f.path("a-count")).unwrap(), "2");
+        let ledger = f.ledger();
+        assert_eq!(ledger["version"], 2);
+        assert_eq!(ledger["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            f.ledger_item("2")["item"]["title"],
+            if conflict_again { "b-2" } else { "a-2" }
+        );
+        let (bytes, failures, reason): (i64, i64, Option<String>) = f.store().connection().query_row(
+            "SELECT ledger_bytes,ledger_failures,ledger_last_failure FROM sessions WHERE source_id='claude:a'", [],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        if conflict_again {
+            assert_eq!((bytes, failures), (0, 1));
+            assert_eq!(reason.as_deref(), Some("账在记的时候被改了"));
+        } else {
+            assert_eq!(bytes as u64, fs::metadata(f.path("a.jsonl")).unwrap().len());
+            assert_eq!(failures, 0);
+            assert!(reason.is_none());
+        }
+    }
+}
+
+#[test]
+fn user_ledger_command_invalidates_even_no_changes_and_retry_uses_the_new_ledger() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.ok(&["ledger", "add", "state", "original"], "old body");
+    f.session("one", "session-one");
+    f.fake_ledger(
+        "NOTHING_TO_CONTINUE",
+        "",
+        r#"
+if [ ! -e "$SIDECAR_TEST_DIR/first-ready" ]; then
+    case "$input" in *'#1 state | original | old body'*) ;; *) exit 83 ;; esac
+    touch "$SIDECAR_TEST_DIR/first-ready"
+    i=0
+    while [ ! -e "$SIDECAR_TEST_DIR/first-release" ]; do
+        i=$((i + 1)); [ "$i" -lt 1000 ]; sleep 0.01
+    done
+    printf 'NO_CHANGES\n' > "$output"
+else
+    case "$input" in *'#1 state | user-edit | user body'*) ;; *) exit 84 ;; esac
+    printf 'EDIT #1 | updated after user | new body | session-one\n' > "$output"
+fi
+exit 0
+"#,
+    );
+    let mut child = RunningSidecar(
+        f.command(&["summarize"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    f.ready("first-ready");
+    f.ok(
+        &["ledger", "edit", "1", "--title", "user-edit"],
+        "user body",
+    );
+    f.release("first-release");
+    let result = child.finish();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    assert_eq!(f.ledger()["version"], 3);
+    let item = f.ledger_item("1");
+    assert_eq!(item["item"]["title"], "updated after user");
+    assert_eq!(item["changes"][0]["before_title"], "user-edit");
+    assert_eq!(item["changes"][0]["before_body"], "user body");
+    assert_eq!(item["changes"][0]["by"], "claude:one");
+    assert_eq!(item["changes"][1]["by"], "user");
+}
+
+#[test]
+fn new_turn_resets_ledger_failure_limit_and_waiter_records_again() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic-first-turn");
+    f.fake_ledger("NOTHING_TO_CONTINUE", "invalid", "");
+    for _ in 0..2 {
+        assert!(!f.run(&["summarize"], "").status.success());
+    }
+    fs::OpenOptions::new()
+        .append(true)
+        .open(f.path("one.jsonl"))
+        .unwrap()
+        .write_all(dialogue("synthetic-next-turn").as_bytes())
+        .unwrap();
+    f.hook("one", "UserPromptSubmit");
+    let failures: i64 = f
+        .store()
+        .connection()
+        .query_row("SELECT ledger_failures FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(failures, 0);
+    // Keep the real turn-start reset above, but seed the waiter trigger without
+    // depending on the SessionEnd hook's 100 ms Git deadline.
+    f.store()
+        .connection()
+        .execute(
+            "INSERT INTO events(source_id,kind,at) VALUES ('claude:one','session_ended',?1)",
+            [cairn::save::now()],
+        )
+        .unwrap();
+    f.fake_ledger(
+        "NOTHING_TO_CONTINUE",
+        "ADD state | next turn | | new decision",
+        "",
+    );
+    assert!(f.waiter("one").finish().status.success());
+    assert_eq!(f.ledger_item("1")["item"]["title"], "next turn");
 }
