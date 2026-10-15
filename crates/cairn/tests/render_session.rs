@@ -335,6 +335,92 @@ fn ledger_budget_reduces_older_bodies_then_uses_count_and_shares_unused_space() 
 }
 
 #[test]
+fn ledger_failure_backlog_is_bounded_without_losing_ledger_summary_or_start_version() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    f.run(&["ledger", "add", "state", "合成账标题"], "合成账正文")
+        .unwrap();
+    let store = f.store();
+    let line = f.cwd().canonicalize().unwrap();
+    record(
+        &store,
+        "summary",
+        "codex:previous",
+        &line,
+        0,
+        ("checkpoint", None),
+        "## 停点\n合成会话摘要",
+    );
+    for n in 0..40 {
+        let id = format!("codex:ledger-failure-{n:02}");
+        source(&store, &id);
+        store.connection().execute(
+            "INSERT INTO sessions(source_id,project_id,line_path,last_event_at,ledger_failures,ledger_last_failure_at,ledger_last_failure)
+             VALUES (?1,1,?2,?3,2,?3,'输出不合格')",
+            params![id,line.to_str().unwrap(),format!("2026-10-05T12:{n:02}:00.000Z")],
+        ).unwrap();
+    }
+    let check = |value: &serde_json::Value| {
+        let text = value["text"].as_str().unwrap();
+        assert!(text.chars().count() <= 9000);
+        let begin = text.find("\n### 项目的账\n").unwrap();
+        let end = text.find("\n### 本工作线\n").unwrap();
+        let ledger = &text[begin..end];
+        assert!(ledger.chars().count() <= 3000);
+        assert!(ledger.contains("#1 合成账标题\n合成账正文"));
+        assert!(text[end..].contains("合成会话摘要"));
+        assert_eq!(value["record_ids"], serde_json::json!(["summary"]));
+        assert_eq!(value["ledger_item_ids"].as_array().unwrap().len(), 1);
+        assert!(ledger.contains("来源 codex:ledger-failure-39 记账最近一次没写成：输出不合格"));
+        assert!(!ledger.contains("来源 codex:ledger-failure-00 "));
+        let shown = ledger
+            .lines()
+            .filter(|l| l.starts_with("来源 codex:ledger-failure-"))
+            .count();
+        assert!((1..40).contains(&shown));
+        for n in (40 - shown)..40 {
+            assert!(ledger.contains(&format!("来源 codex:ledger-failure-{n:02} ")));
+        }
+        assert!(ledger.contains(&format!("另有 {} 个会话记账没写成", 40 - shown)));
+        assert!(ledger.contains(" status`") && ledger.contains(" summarize`"));
+    };
+    let shown: serde_json::Value =
+        serde_json::from_str(&f.run(&["show", "--json"], "").unwrap()).unwrap();
+    check(&shown);
+    for agent in ["claude", "codex"] {
+        let started = session::start(
+            &SessionStarted {
+                disabled: false,
+                command: "/synthetic/cairn/bin/cairn",
+                agent,
+                session_id: "backlog-reader",
+                cwd: &line,
+                transcript_path: None,
+                start_kind: StartKind::Startup,
+                now: "2026-10-05T13:00:00Z".parse().unwrap(),
+            },
+            &f.db(),
+            f.root.path(),
+        )
+        .unwrap()
+        .unwrap();
+        check(&serde_json::to_value(started).unwrap());
+        let committed: (i64, i64, i64) = store
+            .connection()
+            .query_row(
+                "SELECT ledger_injected_version,
+                (SELECT count(*) FROM events WHERE source_id=?1 AND kind='session_started'),
+                (SELECT count(*) FROM injections WHERE source_id=?1 AND record_id='summary')
+             FROM sessions WHERE source_id=?1",
+                [format!("{agent}:backlog-reader")],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(committed, (1, 1, 1));
+    }
+}
+
+#[test]
 fn fixed_example_visibility_corrections_events_and_local_changes() {
     let f = Fixture::new();
     f.git(&f.cwd(), &["init", "-b", "main"]);

@@ -31,7 +31,7 @@ pub(crate) fn start(c: &Connection, request: &Request<'_>) -> Result<Context> {
                 request.command
             )
         })
-        .collect::<String>();
+        .collect::<Vec<_>>();
     let mut context = Context {
         text: String::new(),
         ids: vec![],
@@ -90,8 +90,11 @@ pub(crate) fn start(c: &Connection, request: &Request<'_>) -> Result<Context> {
                 context.text.push_str(&details[i]);
             }
         }
-        context.text.push_str(&failures);
-        if context.text.chars().count() <= budget {
+        if let Some(failures) = budget
+            .checked_sub(context.text.chars().count())
+            .and_then(|remaining| bounded_failures(&failures, remaining, request.command))
+        {
+            context.text.push_str(&failures);
             context.ids = ledger.items.iter().map(|i| i.id.clone()).collect();
             return Ok(context);
         }
@@ -99,15 +102,40 @@ pub(crate) fn start(c: &Connection, request: &Request<'_>) -> Result<Context> {
             full[i] = false;
         } else {
             context.text = format!(
-                "\n### 项目的账\n{} 条有效条目；查看 `{} ledger`。\n{failures}",
+                "\n### 项目的账\n{} 条有效条目；查看 `{} ledger`。\n",
                 ledger.items.len(),
                 request.command
             );
-            if context.text.chars().count() > budget {
-                return Err("预算不足以容纳项目的账查看提示".into());
-            }
+            let failures = budget
+                .checked_sub(context.text.chars().count())
+                .and_then(|remaining| bounded_failures(&failures, remaining, request.command))
+                .ok_or("预算不足以容纳项目的账查看提示")?;
+            context.text.push_str(&failures);
             return Ok(context);
         }
+    }
+}
+
+fn bounded_failures(failures: &[String], budget: usize, command: &str) -> Option<String> {
+    let mut kept = failures.len();
+    let mut length = failures.iter().map(|f| f.chars().count()).sum::<usize>();
+    loop {
+        let omitted = failures.len() - kept;
+        let hint = if omitted == 0 {
+            String::new()
+        } else {
+            format!(
+                "另有 {omitted} 个会话记账没写成；查看 `{command} status`；重试 `{command} summarize`。\n"
+            )
+        };
+        if length + hint.chars().count() <= budget {
+            return Some(failures[..kept].concat() + &hint);
+        }
+        if kept == 0 {
+            return None;
+        }
+        kept -= 1;
+        length -= failures[kept].chars().count();
     }
 }
 
