@@ -93,9 +93,11 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
     let project_key = scope.project_key.to_str().ok_or("项目路径必须是 UTF-8")?;
     let mut seen = Vec::new();
     let mut summaries = Vec::new();
+    let mut ledger_failures = Vec::new();
     let project_status = if let Some(store) = store {
         seen = last_seen(store.connection(), project_key)?;
         summaries = crate::sidecar::observations(store.connection(), &scope)?;
+        ledger_failures = crate::ledger::failures(store.connection(), project_key)?;
         let adopted = store
             .connection()
             .query_row(
@@ -145,6 +147,7 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
         .max_by_key(|s| &s.failure_at)
         .map(|s| json!({"source_id":s.source,"at":s.failure_at,"reason":s.failure}));
     let report = json!({"agents": agents,
+        "ledger":{"failed_sessions":ledger_failures.len(),"last_failure":ledger_failures.first()},
         "sidecar":{"codex_available":codex_available,"unsummarized_sessions":unsummarized,"last_failure":last_failure},
         "stable_path": {"path":paths.stable, "is_symlink":is_symlink, "valid":valid, "target":fs::read_link(&paths.stable).ok()},
         "project":{"key":scope.project_key, "database_path":database,"status":project_status},
@@ -216,6 +219,18 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
             failure["source_id"].as_str().unwrap_or(""),
             failure["at"].as_str().unwrap_or(""),
             failure["reason"].as_str().unwrap_or("")
+        ));
+    }
+    text.push_str(&format!(
+        "项目记账没写成的会话：{}\n",
+        ledger_failures.len()
+    ));
+    if let Some(failure) = ledger_failures.first() {
+        text.push_str(&format!(
+            "记账最近一次没写成：{}（{}）：{}\n",
+            failure.source_id,
+            failure.at.as_deref().unwrap_or("时间未记录"),
+            failure.reason.as_deref().unwrap_or("原因未记录")
         ));
     }
     Ok(text)

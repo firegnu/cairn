@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
 
-pub const CHARACTER_BUDGET: usize = 6_000;
+pub const CHARACTER_BUDGET: usize = 9_000;
 
 pub struct Request<'a> {
     pub scope: &'a Scope,
@@ -28,6 +28,9 @@ pub struct Rendered {
     /// Records whose content is present in text, including appended corrections.
     /// A reference in a folding hint or a source-only fallback is not content.
     pub record_ids: Vec<String>,
+    pub ledger_item_ids: Vec<String>,
+    #[serde(skip)]
+    pub(crate) ledger_version: Option<i64>,
     pub omitted_sources: usize,
 }
 
@@ -105,7 +108,7 @@ pub(crate) fn records(connection: &Connection, project_key: &str) -> rusqlite::R
     rows.collect()
 }
 
-fn age(at: &str, now: DateTime<Utc>) -> Result<String> {
+pub(crate) fn age(at: &str, now: DateTime<Utc>) -> Result<String> {
     let seconds = (now - DateTime::parse_from_rfc3339(at)?.with_timezone(&Utc))
         .num_seconds()
         .max(0);
@@ -179,7 +182,13 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
             .to_str()
             .ok_or("项目路径不是 UTF-8")?,
     )?;
-    let heading = header(request.source_id, request.command);
+    let ledger = crate::ledger::context::start(connection, request)?;
+    let mut heading = header(request.source_id, request.command);
+    if !ledger.text.is_empty() {
+        let first_line = heading.find('\n').unwrap() + 1;
+        heading.insert_str(first_line, crate::ledger::context::DISCLAIMER);
+        heading.push_str(&ledger.text);
+    }
     let mut summary_states = Vec::new();
     for session in crate::sidecar::observations(connection, request.scope)? {
         let mut state = String::new();
@@ -224,6 +233,8 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
         return Ok(Rendered {
             text: heading,
             record_ids: vec![],
+            ledger_item_ids: ledger.ids,
+            ledger_version: Some(ledger.version),
             omitted_sources: 0,
         });
     }
@@ -435,6 +446,8 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
         let mut rendered = Rendered {
             text: heading.clone(),
             record_ids: vec![],
+            ledger_item_ids: ledger.ids.clone(),
+            ledger_version: Some(ledger.version),
             omitted_sources: total_sources - entries.len() - older.len()
                 + levels.iter().filter(|&&level| level >= 2).count(),
         };
@@ -483,6 +496,7 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
 /// Only summaries from sessions already stopped at this source's first start.
 /// The caller records the returned IDs in the same transaction as this read.
 pub(crate) fn supplement(connection: &Connection, request: &Request<'_>) -> Result<Rendered> {
+    let ledger = crate::ledger::context::supplement(connection, request)?;
     let mut query = connection.prepare(
         "SELECT s.source_id FROM sessions s JOIN projects p ON p.id=s.project_id
          WHERE p.key=?1 AND s.line_path=?2 AND s.source_id<>?3
@@ -533,8 +547,10 @@ pub(crate) fn supplement(connection: &Connection, request: &Request<'_>) -> Resu
     let mut levels = vec![0; entries.len()];
     loop {
         let mut rendered = Rendered {
-            text: String::new(),
+            text: ledger.as_ref().map(|l| l.text.clone()).unwrap_or_default(),
             record_ids: vec![],
+            ledger_item_ids: vec![],
+            ledger_version: ledger.as_ref().map(|l| l.version),
             omitted_sources: 0,
         };
         append_section(

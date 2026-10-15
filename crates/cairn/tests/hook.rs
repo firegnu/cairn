@@ -121,6 +121,99 @@ fn allow(_agent: &str, _case: &str) -> &'static str {
 }
 
 #[test]
+fn ledger_hooks_inject_start_then_each_change_once_with_historical_close_reason() {
+    for agent in ["claude", "codex"] {
+        let f = Fixture::new();
+        f.run(&["adopt"], "");
+        f.run(&["ledger", "add", "state", "开局现状"], "开局正文");
+        let started: Value = serde_json::from_str(&f.hook(agent, "session_start")).unwrap();
+        let start_text = started["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(start_text.contains("### 项目的账"));
+        assert!(start_text.contains("#1 开局现状\n开局正文"));
+        assert!(f.hook(agent, "user_prompt_submit").is_empty());
+        f.run(&["ledger", "add", "open", "最初标题"], "最初正文");
+        f.run(&["ledger", "edit", "2", "--title", "中间标题"], "中间正文");
+        f.run(&["ledger", "close", "2", "第一笔理由"], "");
+        f.run(&["ledger", "reopen", "2"], "");
+        f.run(&["ledger", "edit", "2", "--title", "最新标题"], "最新正文");
+        let store =
+            cairn::store::Store::open(f.db(), cairn::store::BusyTimeout::UserCommand).unwrap();
+        let source = format!(
+            "{agent}:{}",
+            f.payload(agent, "session_start")["session_id"]
+                .as_str()
+                .unwrap()
+        );
+        // Its own changes are also delivered; no model process is involved.
+        store
+            .connection()
+            .execute(
+                "UPDATE item_changes SET by=?1 WHERE ledger_version>1",
+                [&source],
+            )
+            .unwrap();
+        let supplemented: Value =
+            serde_json::from_str(&f.hook(agent, "user_prompt_submit")).unwrap();
+        let text = supplemented["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.starts_with("[cairn] 项目的账有变动："), "{text}");
+        for value in [
+            "新增 #2 最初标题",
+            "最初正文",
+            "修改 #2 中间标题",
+            "中间正文",
+            "了结 #2 中间标题",
+            "第一笔理由",
+            "恢复 #2 中间标题",
+            "修改 #2 最新标题",
+            "最新正文",
+        ] {
+            assert!(text.contains(value), "missing {value}: {text}");
+        }
+        assert!(!text.contains("开局正文"));
+        assert!(text.find("最初正文").unwrap() < text.find("最新正文").unwrap());
+        assert!(text.chars().count() <= 3000);
+        assert!(f.hook(agent, "user_prompt_submit").is_empty());
+        let version: i64 = store
+            .connection()
+            .query_row(
+                "SELECT ledger_injected_version FROM sessions WHERE source_id=?1",
+                [&source],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 6);
+        f.run(&["ledger", "delete", "2", "--yes"], "");
+        let deleted = f.hook(agent, "user_prompt_submit");
+        assert!(deleted.contains("删除 #2 （已删除）"));
+        assert!(!deleted.contains("最新正文") && !deleted.contains("第一笔理由"));
+        assert!(f.hook(agent, "user_prompt_submit").is_empty());
+    }
+}
+
+#[test]
+fn ledger_supplement_over_budget_reports_count_and_advances_once() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "");
+    f.hook("codex", "session_start");
+    for _ in 0..5 {
+        f.run(&["ledger", "add", "open", "合成长条目"], &"字".repeat(800));
+    }
+    let value: Value = serde_json::from_str(&f.hook("codex", "user_prompt_submit")).unwrap();
+    let text = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("5 笔变动"));
+    assert!(text.contains(" ledger log`"));
+    assert!(!text.contains(&"字".repeat(800)));
+    assert!(text.chars().count() <= 3000);
+    assert!(f.hook("codex", "user_prompt_submit").is_empty());
+}
+
+#[test]
 fn unadopted_events_are_silent_and_do_not_create_storage() {
     let f = Fixture::new();
     for &(agent, case) in CASES {
@@ -639,7 +732,7 @@ fn version_1_database_reports_nothing_seen_until_a_hook_upgrades_it() {
     let connection = rusqlite::Connection::open(f.db()).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
+            "DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
         )
         .unwrap();
     let version = |connection: &rusqlite::Connection| -> String {
@@ -662,7 +755,7 @@ fn version_1_database_reports_nothing_seen_until_a_hook_upgrades_it() {
     assert_eq!(version(&connection), "1");
 
     assert!(!f.hook("claude", "session_start").is_empty());
-    assert_eq!(version(&connection), "3");
+    assert_eq!(version(&connection), "4");
     assert!(last_seen(&f, "claude", "SessionStart").is_string());
 }
 

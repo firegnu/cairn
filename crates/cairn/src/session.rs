@@ -124,6 +124,10 @@ pub(crate) fn start_with_waiters(
             params![source_id, id, at],
         )?;
     }
+    tx.execute(
+        "UPDATE sessions SET ledger_injected_version=?2 WHERE source_id=?1",
+        params![source_id, rendered.ledger_version],
+    )?;
     tx.commit()?;
     Ok(Some(rendered))
 }
