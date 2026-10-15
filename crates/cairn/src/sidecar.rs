@@ -414,6 +414,8 @@ fn wait_with_timing(store: &mut Store, source: &str, root: &Path, timing: Timing
     loop {
         let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
         if !lease.heartbeat(&tx, Utc::now())? {
+            lease.release(&tx)?;
+            tx.commit()?;
             return Ok(());
         }
         let session = sessions(&tx, None, Some(source))?.pop();
@@ -428,7 +430,9 @@ fn wait_with_timing(store: &mut Store, source: &str, root: &Path, timing: Timing
             return Ok(());
         }
         let triggered: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM events WHERE source_id=?1 AND kind='session_ended')
+            "SELECT COALESCE((SELECT kind='session_ended' FROM events WHERE source_id=?1
+               AND kind IN ('session_started','turn_started','session_ended')
+               ORDER BY at DESC,id DESC LIMIT 1),0)
              OR EXISTS(SELECT 1 FROM events e JOIN sessions s ON s.source_id=e.source_id
                WHERE s.project_id=?2 AND s.line_path=?3 AND e.source_id<>?1
                AND e.kind='session_started' AND e.at>?4)",

@@ -242,6 +242,118 @@ fn waiter_writes_when_the_session_has_ended() {
     assert_eq!(records[0].body.as_deref(), Some("## 停点\nnew-summary\n"));
 }
 
+#[test]
+fn resumed_session_and_new_turns_ignore_old_ends_until_a_new_end_arrives() {
+    for restart in ["session_started", "turn_started"] {
+        let mut f = Fixture::new("before ending", &format!("cat >/dev/null\n{WRITE_OUTPUT}"));
+        let at = crate::save::now();
+        f.store
+            .connection()
+            .execute(
+                "INSERT INTO events(source_id,kind,at) VALUES ('claude:test','session_ended',?1)",
+                [&at],
+            )
+            .unwrap();
+        let timing = Timing {
+            quiet: Duration::from_secs(180),
+            ..fast_timing()
+        };
+        f.wait(timing);
+        assert_eq!(f.summary_count(), 1);
+        fs::remove_file(f.root.path().join("pid")).unwrap();
+
+        // A restart in the same millisecond must invalidate the preceding end.
+        f.store
+            .connection()
+            .execute(
+                "INSERT INTO events(source_id,kind,at) VALUES ('claude:test',?1,?2)",
+                params![restart, at],
+            )
+            .unwrap();
+        let transcript = f.root.path().join("transcript.jsonl");
+        let append = || {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&transcript)
+                .unwrap()
+                .write_all(b"{\"type\":\"user\",\"message\":{\"content\":\"resumed work\"}}\n")
+                .unwrap()
+        };
+        append();
+        // A callback received earlier can commit later; its timestamp still wins
+        // over insertion order. Neither old end may trigger the resumed work.
+        f.store.connection().execute(
+            "INSERT INTO events(source_id,kind,at) VALUES ('claude:test','session_ended','2000-01-01T00:00:00.000Z')", [],
+        ).unwrap();
+        let db = f.root.path().join("state/cairn.db");
+        let marker = f.root.path().join("pid");
+        let events = std::thread::spawn(move || {
+            let store = Store::open(db, BusyTimeout::UserCommand).unwrap();
+            for turn in 0..3 {
+                if turn > 0 {
+                    store.connection().execute(
+                        "INSERT INTO events(source_id,kind,at) VALUES ('claude:test','turn_started',?1)", [&at],
+                    ).unwrap();
+                    fs::OpenOptions::new()
+                        .append(true)
+                        .open(&transcript)
+                        .unwrap()
+                        .write_all(
+                            b"{\"type\":\"user\",\"message\":{\"content\":\"another turn\"}}\n",
+                        )
+                        .unwrap();
+                }
+                let mut beats = std::collections::HashSet::<String>::new();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while beats.len() < 3 {
+                    assert!(
+                        !marker.exists(),
+                        "{restart}, turn {turn}: an old end triggered the model"
+                    );
+                    assert!(
+                        Instant::now() < deadline,
+                        "waiter stopped checking the resumed session"
+                    );
+                    let beat: Option<String> = store
+                        .connection()
+                        .query_row("SELECT waiter_beat_at FROM sessions", [], |r| r.get(0))
+                        .unwrap();
+                    if let Some(beat) = beat {
+                        beats.insert(beat);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            // Same timestamp again: the new end follows the latest turn by ID.
+            store.connection().execute(
+                "INSERT INTO events(source_id,kind,at) VALUES ('claude:test','session_ended',?1)", [&at],
+            ).unwrap();
+        });
+        f.wait(timing);
+        events.join().unwrap();
+        assert_eq!(
+            f.summary_count(),
+            2,
+            "the new end must write without waiting three minutes"
+        );
+        let ends: i64 = f
+            .store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='session_ended'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ends, 3, "historical end events must remain intact");
+        let pid: i32 = fs::read_to_string(f.root.path().join("pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    }
+}
+
 fn fast_timing() -> Timing {
     Timing {
         timeout: Duration::from_secs(2),

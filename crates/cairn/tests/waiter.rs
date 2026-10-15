@@ -269,6 +269,67 @@ fn a_second_waiter_process_exits_while_the_first_owns_the_session() {
 }
 
 #[test]
+fn unadopted_waiter_releases_its_lease_and_readoption_can_start_a_summary() {
+    struct WaitingChild(Child);
+    impl Drop for WaitingChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let f = Fixture::new();
+    let mut child = WaitingChild(
+        f.command(&[
+            "__wait",
+            "--database",
+            f.db().to_str().unwrap(),
+            "--root",
+            f.0.path().to_str().unwrap(),
+            "--source",
+            "claude:old",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap(),
+    );
+    let pid = child.0.id() as i32;
+    let lease = || -> (Option<String>, Option<String>) {
+        f.store()
+            .connection()
+            .query_row("SELECT waiter_id,waiter_beat_at FROM sessions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+    };
+    until(|| lease().0.is_some());
+    let acquired = Instant::now();
+    f.ok(&["unadopt"], "");
+    // Exercise the real 10-second heartbeat. Keep the Child even on assertion
+    // failure so an interrupted test cannot leave its initial waiter alive.
+    let output = finish(&mut child.0, Duration::from_secs(15));
+    assert!(output.status.success());
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert_eq!(
+        lease(),
+        (None, None),
+        "the exited waiter must clear its own token and heartbeat"
+    );
+    assert!(!f.path("model-pid").exists());
+    assert!(
+        acquired.elapsed() < Duration::from_secs(60),
+        "must readopt before the old lease would expire"
+    );
+    f.ok(&["adopt"], "");
+    f.hook("old", "SessionEnd");
+    let waiter = f.model_started();
+    f.release_and_wait(waiter);
+    assert_eq!(lease(), (None, None));
+}
+
+#[test]
 fn prompts_supplement_only_stopped_sessions_and_each_new_version_only_once() {
     for agent in ["claude", "codex"] {
         let f = Fixture::new();
