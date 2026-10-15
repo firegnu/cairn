@@ -352,7 +352,7 @@ fn skipped_sessions_preserve_previous_summary_and_resume_on_new_turns() {
         }
         let before = f.records(true);
         f.fake_codex(
-            r#"case "$input" in *'先判断：下一个会话接着干活时'*'NOTHING_TO_CONTINUE'*'用得上时，只输出 Markdown'*) ;; *) exit 83 ;; esac"#,
+            r#"case "$input" in *'先判断：下一个会话接着干活时'*'NOTHING_TO_CONTINUE，不写别的。拿不准时，按用得上写。'*'用得上时，只输出 Markdown'*) ;; *) exit 83 ;; esac"#,
             "NOTHING_TO_CONTINUE",
         );
         f.ok(&["summarize"], "");
