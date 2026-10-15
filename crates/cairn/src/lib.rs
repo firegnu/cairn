@@ -12,6 +12,7 @@ pub mod render;
 pub mod save;
 pub mod scope;
 pub mod session;
+pub mod sidecar;
 pub mod spool;
 mod status;
 pub mod store;

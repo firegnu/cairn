@@ -92,8 +92,10 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
         crate::store::Store::open_read_only(database, crate::store::BusyTimeout::UserCommand)?;
     let project_key = scope.project_key.to_str().ok_or("项目路径必须是 UTF-8")?;
     let mut seen = Vec::new();
+    let mut summaries = Vec::new();
     let project_status = if let Some(store) = store {
         seen = last_seen(store.connection(), project_key)?;
+        summaries = crate::sidecar::observations(store.connection(), &scope)?;
         let adopted = store
             .connection()
             .query_row(
@@ -132,7 +134,15 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
     } else {
         None
     };
+    let codex_available = crate::sidecar::codex_path().is_some();
+    let unsummarized = summaries.iter().filter(|s| s.summary.is_none()).count();
+    let last_failure = summaries
+        .iter()
+        .filter(|s| s.failure.is_some())
+        .max_by_key(|s| &s.failure_at)
+        .map(|s| json!({"source_id":s.source,"at":s.failure_at,"reason":s.failure}));
     let report = json!({"agents": agents,
+        "sidecar":{"codex_available":codex_available,"unsummarized_sessions":unsummarized,"last_failure":last_failure},
         "stable_path": {"path":paths.stable, "is_symlink":is_symlink, "valid":valid, "target":fs::read_link(&paths.stable).ok()},
         "project":{"key":scope.project_key, "database_path":database,"status":project_status},
         "spool":{"path":spool.path,"pending_json":spool.pending_json,"residual_tmp":spool.residual_tmp},
@@ -188,6 +198,22 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
     ));
     if let Some(trust) = trust {
         text.push_str(trust);
+    }
+    text.push_str(&format!(
+        "\n旁路摘要：{}；当前工作线还没有摘要的会话：{unsummarized}\n",
+        if codex_available {
+            "codex 在 PATH"
+        } else {
+            "codex 不在 PATH"
+        }
+    ));
+    if let Some(failure) = last_failure {
+        text.push_str(&format!(
+            "最近一次没写成：{}（{}）：{}\n",
+            failure["source_id"].as_str().unwrap_or(""),
+            failure["at"].as_str().unwrap_or(""),
+            failure["reason"].as_str().unwrap_or("")
+        ));
     }
     Ok(text)
 }

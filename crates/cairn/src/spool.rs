@@ -55,6 +55,21 @@ pub fn trusted_root() -> Result<PathBuf> {
         .ok_or(Error::NoTemporaryRoot)
 }
 
+/// Use the spool's trusted-root policy for an isolated, disposable model cwd.
+pub(crate) fn sidecar_directory(root: &Path) -> Result<tempfile::TempDir> {
+    if !root.is_absolute() {
+        return Err(Error::UnsafeDirectory);
+    }
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(root)?;
+    check_directory(&directory, 0o022)?;
+    Ok(tempfile::Builder::new()
+        .prefix("cairn-sidecar-")
+        .tempdir_in(root)?)
+}
+
 pub struct Spool {
     directory: File,
     path: PathBuf,
