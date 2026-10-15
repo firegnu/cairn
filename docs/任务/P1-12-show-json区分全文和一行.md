@@ -1,0 +1,36 @@
+# 任务：show --json 标出每条记录在注入里给的是全文还是一行
+
+2026-10-15，用户让主控记成草稿任务。**草稿，没派。**
+
+## 用户原话
+
+2026-10-15，和 cairn/main（主控）讨论 paddock Cairn 面板上好几条都标着 “Next session starts from this” 时：
+
+1. “还要把全文和一行分开标：cairn 先加字段（一件小活）。 啥意思？”
+2. “先只让paddock改文字吧。”（面板文字 paddock P5-108 已改）
+3. “然后那个json区分征文的那个还有长期记忆的任务，这是三个任务。都记录到draft task中”
+
+## 要做的
+
+`cairn show --json` 除了 `record_ids`，还要告诉调用方每条记录在开局注入里给的是全文还是一行，让 paddock 面板能分开标。
+
+## 怎么算做完
+
+用户还没说。
+
+## 现状（主控核对过）
+
+- `show --json` 现在只给 `text` 和 `record_ids`（`docs/DESIGN.md` §7.1）。`record_ids` 里有：本工作线最近 3 个会话（全文）、更早最多 10 个会话（一行）、同项目其他工作线（一行）、更正记录；注入超预算时较早的会缩成只给停点。
+- paddock 现在把 `record_ids` 里的都标成 “Next session starts from this”，分不出全文和一行。
+
+## 主控的理解（待用户确认）
+
+以下是主控的理解，用户还没确认，不是需求。
+
+- 按 §7.1“只加不改”，新加一个字段（比如每条带 `shown`: `full` / `stopping_point` / `line`），`record_ids` 照旧。
+- cairn 这边做完、装上之后，再告诉 paddock/main 去用。
+
+## 还没定的
+
+- 字段名和取值；其他工作线、更正记录怎么标。
+- 动工前先改 `docs/DESIGN.md` §7.1。
