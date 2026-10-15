@@ -65,7 +65,7 @@ fn database_path() -> crate::store::Result<PathBuf> {
 }
 
 /// Production resolves the system private spool root; run_at supplies isolated
-/// paths. This boundary always returns a successful response; only SessionStart injects output.
+/// paths. This boundary always returns a successful response; start and prompt hooks inject context.
 pub fn run(agent: Agent, input: &mut impl Read, paths: Option<(&Path, &Path)>) -> String {
     let disabled = std::env::var_os("CAIRN_DISABLE").is_some_and(|v| v == "1");
     let mut bytes = Vec::new();
@@ -94,7 +94,17 @@ pub fn run(agent: Agent, input: &mut impl Read, paths: Option<(&Path, &Path)>) -
             Some((_, root)) => root.into(),
             None => crate::spool::trusted_root()?,
         };
-        dispatch(agent, event, metadata, &database, &root)
+        // Explicit-path callers exercise core handling without launching the
+        // test harness as a worker; process integration tests use the real CLI.
+        let executable = paths.is_none().then(std::env::current_exe).transpose()?;
+        dispatch(
+            agent,
+            event,
+            metadata,
+            &database,
+            &root,
+            executable.as_deref(),
+        )
     })();
     result.unwrap_or_else(|error| {
         log_error(
@@ -113,6 +123,7 @@ fn dispatch(
     metadata: Metadata,
     database: &Path,
     root: &Path,
+    executable: Option<&Path>,
 ) -> crate::cli::Result<String> {
     let now = chrono::Utc::now();
     let command = crate::install::stable_command()?;
@@ -126,7 +137,7 @@ fn dispatch(
             Some("fork") => StartKind::Fork,
             _ => StartKind::Other,
         };
-        return Ok(crate::session::start(
+        return Ok(crate::session::start_with_waiters(
             &crate::session::SessionStarted {
                 disabled: false,
                 command: &command,
@@ -139,6 +150,24 @@ fn dispatch(
             },
             database,
             root,
+            |connection, scope, source| {
+                if let Some(executable) = executable {
+                    match crate::sidecar::pending_sessions(connection, scope, source) {
+                        Ok(sources) => {
+                            for source in sources {
+                                if crate::sidecar::launch_waiter(
+                                    connection, database, root, &source, executable,
+                                )
+                                .is_err()
+                                {
+                                    log_error(agent, event, "waiter", Some(database));
+                                }
+                            }
+                        }
+                        Err(_) => log_error(agent, event, "database", Some(database)),
+                    }
+                }
+            },
         )?
         .map(|rendered| {
             json!({"hookSpecificOutput": {
@@ -177,8 +206,38 @@ fn dispatch(
         "SessionEnd" => crate::turn::session_ended(context, metadata.reason.as_deref()),
         _ => unreachable!(),
     };
+    if matches!(event, "Stop" | "SessionEnd") {
+        if let Some(executable) = executable {
+            let launched = (|| -> crate::cli::Result<()> {
+                if let Some(store) =
+                    crate::store::Store::open_read_only(database, crate::store::BusyTimeout::Hook)?
+                {
+                    crate::sidecar::launch_waiter(
+                        store.connection(),
+                        database,
+                        root,
+                        &format!("{}:{}", agent.name(), metadata.session_id),
+                        executable,
+                    )?;
+                }
+                Ok(())
+            })();
+            if launched.is_err() {
+                log_error(agent, event, "waiter", Some(database));
+            }
+        }
+    }
     if let Some(error) = report.errors.into_iter().next() {
         return Err(error.into());
+    }
+    if event == "UserPromptSubmit" {
+        let text = crate::turn::supplement(context, &command)?;
+        if !text.is_empty() {
+            return Ok(json!({"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit", "additionalContext": text
+            }})
+            .to_string());
+        }
     }
     Ok(String::new())
 }
@@ -275,6 +334,7 @@ fn log_error(agent: Agent, event: &str, category: &str, database: Option<&Path>)
             "git" => "git discovery or facts failed",
             "spool" => "private spool unavailable or rejected",
             "ingest" => "spool collection incomplete or failed",
+            "waiter" => "background summary process could not start",
             _ => "core event handling failed",
         };
         writeln!(

@@ -38,6 +38,15 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(name = "__wait", hide = true)]
+    Wait {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        source: String,
+    },
     Summarize,
     Config {
         key: Option<String>,
@@ -125,6 +134,15 @@ fn read_body(input: &mut impl Read, nothing_new: bool) -> Result<Option<String>>
 }
 
 pub fn run(cli: Cli, input: &mut impl Read) -> Result<String> {
+    if let Command::Wait {
+        database,
+        root,
+        source,
+    } = cli.command
+    {
+        crate::sidecar::wait(&database, &root, &source)?;
+        return Ok(String::new());
+    }
     if let Command::Install {
         agent,
         dry_run,
@@ -181,6 +199,14 @@ pub fn run_at(
     root: &Path,
 ) -> Result<String> {
     match cli.command {
+        Command::Wait {
+            database,
+            root,
+            source,
+        } => {
+            crate::sidecar::wait(&database, &root, &source)?;
+            return Ok(String::new());
+        }
         Command::Install {
             agent,
             dry_run,

@@ -2,7 +2,9 @@
 
 [English](README.md) | 简体中文
 
-cairn 是给终端里的 coding agent 使用的工作接续记忆工具。它把上次会话停在哪里、现场有哪些可观测变化、建议的下一步保存下来，让新的 Claude Code 或 Codex 会话开局就能看到；每个正常结束的回合也都有一次保存接续内容的机会。
+cairn 是给终端里的 coding agent 使用的工作接续记忆工具。它把上次会话停在哪里、现场有哪些可观测变化、建议的下一步保存下来，让新的 Claude Code 或 Codex 会话开局看到已有的摘要。会话安静满 3 分钟、会话结束，或同一条工作线上有新会话开局时，在后台写摘要。开局不等待；开局时已经停下的会话，其摘要若没赶上，会在你下一次发话时补进去。
+
+cairn 读取 hook 给出的会话记录路径，调用已登录的 `codex exec` 写摘要，Claude Code 的会话也一样。使用摘要功能需要安装并登录 Codex；会话内容的摘录会交给 Codex，原文不存进 cairn 数据库。会话里的 agent 不再每回合保存，也不再为了保存而续跑。
 
 cairn 独立运行，不依赖 Saddle、Corral 或 Drover。首版支持 Claude Code 和 Codex，只有明确采用的项目才会启用。
 
@@ -49,6 +51,8 @@ cairn unadopt
 ## 日常命令
 
 - `cairn show`：显示当前工作线会注入给 agent 的接续内容。
+- `cairn summarize`：在前台为当前工作线上该写摘要的会话写摘要，也可用于失败后重试。`show`、`list`、`status` 都不会触发写摘要。
+- `cairn config`：查看摘要设置；用 `cairn config sidecar.model <模型>`、`cairn config sidecar.effort <强度>` 修改，默认分别为 `gpt-5.6-luna`、`medium`。
 - `cairn list [--json]`：列出当前项目可见的记录（`--line` 只列当前工作线）。
 - `cairn show <ID>`：显示指定记录的完整内容。
 - `cairn correct <ID>`：为指定记录追加一条更正，正文从标准输入传入。
@@ -58,7 +62,7 @@ cairn unadopt
 - `cairn export`：把当前工作线的记录导出到标准输出，也可以指定一个新文件路径。
 - `cairn status`：查看 agent 安装、项目采用状态和暂存区状态。
 
-保存记录时，正文通过标准输入传给 `cairn save`，例如：
+`cairn save` 留作自愿使用，或在你明确要求 agent 留一条记录时使用；正文通过标准输入传入，例如：
 
 ```sh
 printf '%s\n' '## 停点' '完成了一个阶段。' | cairn save
@@ -68,7 +72,7 @@ printf '%s\n' '## 停点' '完成了一个阶段。' | cairn save
 
 主数据库位于 `${XDG_STATE_HOME:-$HOME/.local/state}/cairn/cairn.db`。agent 受限保存入口先把内容写入用户私有临时目录的 `cairn-spool/`，再由 hook 收取；`cairn status` 会报告暂存区路径和未收取文件。
 
-设置 `CAIRN_DISABLE=1` 可临时禁用 cairn hook：hook 放行，不注入接续内容，也不保存本回合记录。
+启动会话前设置 `CAIRN_DISABLE=1` 可将它排除在 cairn 之外：该会话的 hook 不注入内容，也不记录供自动摘要使用的事件和会话记录路径。
 
 ## 卸载与删除数据
 
