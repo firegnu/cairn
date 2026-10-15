@@ -171,7 +171,7 @@
   - ranch（corral／派活技能）派出去的 agent 一律带 `CAIRN_DISABLE=1`（ranch R2），cairn 只留给用户直接对话的主控。
 - **paddock 已经在用 cairn**：右侧栏第四个标签 Cairn（paddock P5-55，已合并安装）调用 `cairn status --json`、`cairn show --json`、`cairn adopt` 三条，面板开着时每 5 秒读一次（`show` 会顺手收取暂存区）。paddock 的 P5-78 要在面板上显示 `last_seen`；P5-79 要把正文改成记录列表、点开看单条，用 0.3.0 的 `cairn list --json` 和 `cairn show <ID> --json`（都由 paddock 主控做，进度看 paddock 的 HANDOFF）。
 - **真实环境装的是 0.4.0**（10-15 装，main 也是 0.4.0），数据库在装后第一次读写时（hook 或 show）升到版本 3；0.3.0 时的库备份在 `~/.local/state/cairn-backup-0.3.0-20261015-142959/`。
-- 现在没有开着的 dev / test agent，没有未清理的 worktree 或分支；`cairn-worktrees/` 下有编译目录 `.target`（10-15 起 AGENTS.md 改成每个工作目录用 `.target/<子目录>`）、P1-07～P1-10 留下的 `.target-*` 十三个（主控开的，约 7 GB，删不删问用户）和 `p1-lab`。
+- 现在没有开着的 dev / test agent，没有未清理的 worktree 或分支；`cairn-worktrees/` 下只有空的编译目录 `.target`（10-15 起每个工作目录用 `.target/<子目录>`；旧产物和 P1-07～P1-10 的 `.target-*` 经用户同意已删，约 11 GB）和 `p1-lab`。
 - 以下是 10-07 之前各阶段的情况（没变）：
   - **阶段 1（能力实测）已完成**：门槛 A、B、C、F 在 Claude Code 2.1.289 和 Codex 0.160.0 上满足本次实测范围。报告：`docs/调研/第一阶段能力实测.md`；任务与审查记录：`docs/tasks/P1-*.md`。
   - DESIGN 已按实测结论修订（§8.3、§9.1、§10、§14、§15），并新增**暂存区写入设计**（§6.5）：`cairn save` 只写用户私有临时目录里的暂存文件，hook 和用户命令收进数据库。经独立交叉审查两轮复核通过。
