@@ -208,7 +208,7 @@ fn merge(raw: &str, paths: &Paths, agent: Agent, uninstall: bool) -> Result<Stri
                     handler["timeout"] = json!(if matches!(agent, Agent::Codex) { 3 } else { 1 });
                 }
                 if event == "SessionStart" && matches!(agent, Agent::Codex) {
-                    handler["additionalContextLimit"] = json!(6000);
+                    handler["additionalContextLimit"] = json!(12000);
                 }
                 groups.push(json!({"hooks":[handler]}));
             }

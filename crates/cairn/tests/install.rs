@@ -210,7 +210,7 @@ fn install_preserves_other_text_and_uses_stable_paths() {
                 assert_eq!(h["timeout"], if agent == "codex" { 3 } else { 1 });
             }
             if agent == "codex" && event == "SessionStart" {
-                assert_eq!(h["additionalContextLimit"], 6000);
+                assert_eq!(h["additionalContextLimit"], 12000);
             }
         }
         if agent == "claude" {
