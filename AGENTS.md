@@ -29,7 +29,7 @@ cairn 是给终端里 coding agent 用的工作接续记忆工具：新会话开
 - **不按名字批量杀进程**：不要用 `pkill -f cairn`、`pkill -f corral` 这类命令，主控和其他 agent 的命令行里都带着项目名和工作目录。停自己起的进程，用启动时记下的 PID。
 - **测试不依赖真实 agent**：hook 适配用合成的 JSON 夹具测试。阶段 1 的实测是唯一例外，因为它就是要验证真实 agent 的能力。
 - **验证**：按改动影响面选择检查。小改动跑直接相关的测试；跨模块改动、阶段集成和合并前，跑 `cargo test --all-targets` 和 `cargo clippy --all-targets -- -D warnings`。保留有价值的测试，不靠删测试、放宽断言或缩短超时来通过检查。
-- **共用编译目录**：所有 worktree 共用一个编译目录，命令前加 `CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target`。
+- **编译目录**：编译产物都放在 `$HOME/Developer/personal_projs/cairn-worktrees/.target/` 下，每个工作目录用自己的子目录，不和别的 worktree 共用：命令前加 `CARGO_TARGET_DIR=$HOME/Developer/personal_projs/cairn-worktrees/.target/<子目录>`。主仓库用 `main`，任务 worktree 用分支名，交叉审查 worktree 用 `review-<分支>`。原因：并行的 worktree 编的是同一个包，共用目录会互相覆盖 `cairn` 可执行文件，用它的 hook 测试就会假失败（P1-07、P1-08 并行时遇到过）。清 worktree 时一并删掉它的子目录。
 
 ## 开发方式（主控分派）
 
