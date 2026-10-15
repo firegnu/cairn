@@ -1008,3 +1008,114 @@ fn injection_has_three_full_sources_ten_older_lines_and_no_same_source_folding()
         .text
         .contains("`/synthetic/cairn/bin/cairn list --line`"));
 }
+
+#[test]
+fn fourth_source_correction_content_and_injections_stay_together_through_budget_and_resume() {
+    for omit_older in [false, true] {
+        let f = Fixture::new();
+        f.run(&["adopt"], "").unwrap();
+        let s = f.store();
+        let line = f.cwd().canonicalize().unwrap();
+        let padding = if omit_older {
+            "字".repeat(1500)
+        } else {
+            String::new()
+        };
+        let original = format!("ORIGINAL-0{padding}");
+        let corrected = format!("CORRECTED-0{padding}");
+        record(
+            &s,
+            "record-0",
+            "codex:source-0",
+            &line,
+            0,
+            ("checkpoint", None),
+            &format!("## 停点\n\n{original}\nORIGINAL-SECOND-LINE\n## 已完成及验证\n原正文"),
+        );
+        for n in 1..4 {
+            record(
+                &s,
+                &format!("record-{n}"),
+                &format!("codex:source-{n}"),
+                &line,
+                n,
+                ("checkpoint", None),
+                &format!(
+                    "## 停点\nORIGINAL-{n}\n## 已完成及验证\n{}",
+                    "新".repeat(1000)
+                ),
+            );
+        }
+        let result = f
+            .run(
+                &["correct", "record-0"],
+                &format!(
+                    "## 停点\n\n{corrected}\nCORRECTED-SECOND-LINE\n## 已完成及验证\n更正正文"
+                ),
+            )
+            .unwrap();
+        let correction = result.split_whitespace().nth(1).unwrap();
+        let expected_line = format!(
+            "来源 codex:source-0 · 记录 record-0 · {original} · 更正 {correction}（来源 local:{correction}） · {corrected}"
+        );
+        let mut expected_ids = vec!["record-3", "record-2", "record-1"];
+        if !omit_older {
+            expected_ids.extend(["record-0", correction]);
+        }
+        let check = |text: &str| {
+            assert!(text.chars().count() <= 6000);
+            if omit_older {
+                assert!(!text.contains("record-0"));
+                assert!(!text.contains(correction));
+                assert!(!text.contains("ORIGINAL-0"));
+                assert!(!text.contains("CORRECTED-0"));
+            } else {
+                assert!(
+                    text.lines().any(|line| line.ends_with(&expected_line)),
+                    "{text}"
+                );
+                assert!(!text.contains("ORIGINAL-SECOND-LINE"));
+                assert!(!text.contains("CORRECTED-SECOND-LINE"));
+            }
+        };
+        let shown: serde_json::Value =
+            serde_json::from_str(&f.run(&["show", "--json"], "").unwrap()).unwrap();
+        check(shown["text"].as_str().unwrap());
+        assert_eq!(shown["record_ids"], serde_json::json!(expected_ids));
+        assert_eq!(count(&s, "injections"), 0);
+
+        let started = start(&f, StartKind::Startup, false).unwrap();
+        check(&started.text);
+        assert_eq!(started.record_ids, expected_ids);
+        assert_eq!(started.omitted_sources, usize::from(omit_older));
+        let injections = || -> Vec<String> {
+            s.connection().prepare(
+                "SELECT record_id FROM injections WHERE source_id='codex:reader' ORDER BY record_id"
+            ).unwrap().query_map([], |r| r.get(0)).unwrap()
+                .collect::<rusqlite::Result<_>>().unwrap()
+        };
+        expected_ids.sort();
+        assert_eq!(injections(), expected_ids);
+
+        let resumed = start(&f, StartKind::Resume, false).unwrap();
+        if omit_older {
+            assert_eq!(resumed.record_ids, ["record-0", correction]);
+            assert!(resumed.text.contains(&original));
+            assert!(resumed.text.contains(&corrected));
+            assert!(resumed
+                .text
+                .contains(&format!("更正 {correction} · 来源 local:{correction}")));
+            expected_ids.extend(["record-0", correction]);
+            expected_ids.sort();
+        } else {
+            assert!(resumed.record_ids.is_empty());
+            assert!(!resumed.text.contains("ORIGINAL-0"));
+            assert!(!resumed.text.contains("CORRECTED-0"));
+        }
+        assert_eq!(injections(), expected_ids);
+        assert!(start(&f, StartKind::Resume, false)
+            .unwrap()
+            .record_ids
+            .is_empty());
+    }
+}

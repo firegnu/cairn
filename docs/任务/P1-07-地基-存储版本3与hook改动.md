@@ -98,6 +98,14 @@
 
 没有需要主控裁定的设计矛盾；独立审查与后续集成由主控继续安排。
 
+### 返工
+
+2026-10-15，按交叉审查 R1 和主控选择的第一种改法修复：较早来源同一行分别保留原停点第一行、更正停点第一行，并标明更正来源和 ID；两条记录随这一行一起登记，预算移除整行时两条登记一起移除。沿用增量规则，已注入的原记录不重复展示或登记。
+
+新增第 4 个来源带更正的回归，覆盖正常显示和预算移除两种情况，核对文字、`show --json` 的 `record_ids`、实际 `injections` 及 resume；先确认旧实现因缺少原停点失败，再修复通过。限定运行 `render_session` 16 项、`hook` 14 项、`cmds` 21 项，共 51 项全部通过；`cargo clippy --all-targets -- -D warnings`、`cargo fmt --check`、`git diff --check` 均通过。全部 Cargo 命令改用 `.target-p1-07`，命令均在前台等待结束。
+
+只改 R1 的渲染、直接回归和本完成记录；未合并、未推送，无需主控追加决定。
+
 ## 主控审查
 
 2026-10-15，cairn/main。看了 diff：改动在任务书范围内；hook 定义、install 实现、DESIGN、transcript 文件没动；`install.rs` 测试只改了续跑相关的两处断言（Stop 不再 block，提示里只剩一处 save 路径），属于有意去掉的行为。版本 3 的表结构照 §6.2；`list --json`、`show <ID> --json` 加了 `written_by`，其余字段没动。

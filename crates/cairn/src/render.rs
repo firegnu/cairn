@@ -218,31 +218,46 @@ pub fn render(connection: &Connection, request: &Request<'_>) -> Result<Rendered
         total_sources += 1;
         if total_sources > 3 {
             if older.len() < 10 {
-                let content = correction.unwrap_or(record);
-                let point = stopping_point(content.body.as_deref().unwrap());
-                let summary = point
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("");
+                let summary = if already {
+                    String::new()
+                } else {
+                    let point = stopping_point(record.body.as_deref().unwrap());
+                    format!(
+                        " · {}",
+                        point
+                            .lines()
+                            .find(|line| !line.trim().is_empty())
+                            .unwrap_or("")
+                    )
+                };
                 let mut ids = if already {
                     vec![]
                 } else {
                     vec![record.id.clone()]
                 };
-                let correction_label = if let Some(correction) = correction {
+                let correction_summary = if let Some(correction) = correction {
                     ids.push(correction.id.clone());
-                    format!(" · 更正 {}（来源 {}）", correction.id, correction.source)
+                    let point = stopping_point(correction.body.as_deref().unwrap());
+                    format!(
+                        " · 更正 {}（来源 {}） · {}",
+                        correction.id,
+                        correction.source,
+                        point
+                            .lines()
+                            .find(|line| !line.trim().is_empty())
+                            .unwrap_or("")
+                    )
                 } else {
                     String::new()
                 };
                 older.push(Piece {
                     text: format!(
-                        "{} · 来源 {} · 记录 {}{} · {}\n",
+                        "{} · 来源 {} · 记录 {}{}{}\n",
                         age(&record.at, request.now)?,
                         record.source,
                         record.id,
-                        correction_label,
-                        summary
+                        summary,
+                        correction_summary
                     ),
                     ids,
                 });
