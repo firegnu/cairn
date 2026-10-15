@@ -347,6 +347,7 @@ fn supersession_committed_after_restore_is_not_cancelled_by_that_restore() {
     assert!(restored["replaced_by"].is_null());
 
     let event = SessionStarted {
+        transcript_path: None,
         command: "/synthetic/cairn/bin/cairn",
         disabled: false,
         agent: "codex",
@@ -713,15 +714,10 @@ fn export_keeps_visible_line_history_and_never_overwrites_a_file() {
     let text = result.unwrap();
     assert!(text.starts_with("导出自 cairn，时间"));
     assert!(text.lines().next().unwrap().ends_with("非权威"));
-    for expected in [
-        "第一来源旧记录",
-        "第一来源新记录",
-        "第二来源记录",
-        "第二来源更正",
-        &source,
-    ] {
+    for expected in ["第一来源新记录", "第二来源记录", "第二来源更正", &source] {
         assert!(text.contains(expected), "{text}");
     }
+    assert!(!text.contains("第一来源旧记录"));
     assert!(!text.contains("不应导出的撤回内容"));
     assert!(!text.contains("其他线内容"));
     assert!(text.contains("\n## 停点\n"));
@@ -947,7 +943,7 @@ fn json_contract_list_reads_v1_without_ingesting_or_upgrading() {
     store
         .connection()
         .execute_batch(
-            "DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version';
+            "DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version';
          PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
@@ -1048,7 +1044,7 @@ fn json_contract_list_fields_sources_order_and_limits() {
             "agent": "local", "session_id": null, "source_id": format!("local:{local}"),
             "line_path": f.cwd().canonicalize().unwrap(), "branch": null,
             "kind": "checkpoint", "target_id": null, "deleted_at": null,
-            "replaced_by": null, "retracted": false, "summary": "  摘要保留空格  "
+            "replaced_by": null, "retracted": false, "summary": "  摘要保留空格  ", "written_by": "save"
         })
     );
     for (id, agent) in [(&ids[1], "claude"), (&ids[2], "codex"), (&ids[3], "local")] {
@@ -1213,9 +1209,10 @@ fn json_contract_show_collects_upgrades_and_preserves_body_and_correction() {
     let store = f.store();
     store
         .connection()
-        .execute_batch("DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version'")
+        .execute_batch("DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version'")
         .unwrap();
     let shown = f.show(&id);
+    assert_eq!(shown["written_by"], "save");
     assert_eq!(shown["body"], body);
     assert_eq!(shown["created_at"], "2026-10-10T08:50:43.687Z");
     assert_eq!(shown["correction"], Value::Null);
@@ -1228,7 +1225,7 @@ fn json_contract_show_collects_upgrades_and_preserves_body_and_correction() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, "2");
+    assert_eq!(version, "3");
     for key in [
         "project_id",
         "project_key",
@@ -1262,4 +1259,95 @@ fn json_contract_show_collects_upgrades_and_preserves_body_and_correction() {
     let output = f.process(&["show", "absent", "--json"], "", false);
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "记录不存在\n");
+}
+
+#[test]
+fn json_contract_version_2_is_read_only_and_defaults_writer_to_save() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let id = f.queued("## 停点\n版本 2 的正文");
+    f.run(&["list"], "").unwrap();
+    let store = f.store();
+    store
+        .connection()
+        .execute_batch(
+            "DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by;
+        UPDATE meta SET value='2' WHERE key='schema_version'; PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    let before = fs::read(f.db()).unwrap();
+    let listed = f.list_json(&[]);
+    assert_eq!(listed["records"][0]["id"], id);
+    assert_eq!(listed["records"][0]["written_by"], "save");
+    assert_eq!(fs::read(f.db()).unwrap(), before);
+    let status: Value = serde_json::from_str(&f.run(&["status", "--json"], "").unwrap()).unwrap();
+    assert_eq!(status["project"]["status"], "adopted");
+    assert_eq!(fs::read(f.db()).unwrap(), before);
+}
+
+#[test]
+fn save_versions_replace_only_the_same_sources_visible_checkpoint_on_this_line() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    let old = f.queued("## 停点\n旧版本");
+    f.run(&["list"], "").unwrap();
+    let source = f.show(&old)["source_id"].as_str().unwrap().to_owned();
+    let other = f.queued("## 停点\n其他来源");
+    f.run(&["list"], "").unwrap();
+    let store = f.store();
+    store
+        .connection()
+        .execute(
+            "UPDATE records SET written_by='sidecar' WHERE id=?1",
+            [&old],
+        )
+        .unwrap();
+    store.connection().execute(
+        "INSERT INTO records(id,project_id,line_path,source_id,kind,body,created_at)
+         SELECT 'other-line',project_id,'/synthetic/other-line',source_id,'checkpoint','## 停点\n另一线',created_at FROM records WHERE id=?1", [&old]
+    ).unwrap();
+    let listed = f.list_json(&[]);
+    assert_eq!(
+        listed["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == old)
+            .unwrap()["written_by"],
+        "sidecar"
+    );
+    assert_eq!(f.show(&old)["written_by"], "sidecar");
+    let saved = f
+        .run(&["save", "--source", &source], "## 停点\n新版本")
+        .unwrap();
+    let new = saved.split_whitespace().nth(1).unwrap();
+    let previous = f.show(&old); // Collect, without any prior injections.
+    assert_eq!(previous["replaced_by"], new);
+    assert_eq!(previous["body"], "## 停点\n旧版本");
+    assert_eq!(f.show(new)["written_by"], "save");
+    assert!(f.show(&other)["replaced_by"].is_null());
+    assert!(f.show("other-line")["replaced_by"].is_null());
+    let listed = f.list_json(&[]);
+    assert!(!listed["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["id"] == old));
+    assert!(f.list_json(&["--all"])["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["id"] == old));
+    f.run(&["save", "--source", &source, "--nothing-new"], "")
+        .unwrap();
+    assert!(f.show(new)["replaced_by"].is_null());
+    f.run(&["restore", &old], "").unwrap();
+    assert!(f.show(&old)["replaced_by"].is_null());
+    // A rejected explicit target must not partially version the prior record.
+    f.run(
+        &["save", "--source", &source, "--supersedes", "missing"],
+        "## 停点\n拒收",
+    )
+    .unwrap();
+    assert!(f.show(new)["replaced_by"].is_null());
 }

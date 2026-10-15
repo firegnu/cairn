@@ -79,3 +79,23 @@ CREATE TABLE hook_seen (
     PRIMARY KEY (project_id, agent, event)
 );
 "#;
+
+/// Session metadata for sidecar summaries; existing records were written by save.
+pub(super) const V3: &str = r#"
+ALTER TABLE records ADD COLUMN written_by TEXT NOT NULL DEFAULT 'save';
+CREATE TABLE sessions (
+    source_id TEXT PRIMARY KEY NOT NULL REFERENCES sources(id),
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    line_path TEXT NOT NULL, branch TEXT,
+    transcript_path TEXT,
+    turns INTEGER NOT NULL DEFAULT 0,
+    last_event_at TEXT NOT NULL,
+    facts TEXT, facts_at TEXT,
+    summarized_bytes INTEGER NOT NULL DEFAULT 0,
+    summarized_turns INTEGER NOT NULL DEFAULT 0,
+    summary_record_id TEXT REFERENCES records(id),
+    waiter_id TEXT, waiter_beat_at TEXT,
+    failures INTEGER NOT NULL DEFAULT 0,
+    last_failure_at TEXT, last_failure TEXT
+);
+"#;

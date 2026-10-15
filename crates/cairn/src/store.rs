@@ -11,7 +11,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 
 mod schema;
 
-pub const SCHEMA_VERSION: u64 = 2;
+pub const SCHEMA_VERSION: u64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -119,7 +119,7 @@ impl Store {
     }
 
     /// Open an existing WAL database of any supported version without migration or chmod:
-    /// version 2 only adds a table, so readers of an older one must not expect it. Missing paths
+    /// Readers of older versions must account for missing tables and columns. Missing paths
     /// return None; the same path safety checks as open apply before SQLite access,
     /// including to sidecars even when the database is absent. SQLite may create WAL
     /// sidecars for an existing database, but never the database or its directory.
@@ -161,7 +161,7 @@ impl Store {
         let tx = self.transaction(TransactionBehavior::Immediate)?;
         let found = schema_version(&tx)?;
         if found < SCHEMA_VERSION {
-            for (version, step) in [(1, schema::V1), (2, schema::V2)] {
+            for (version, step) in [(1, schema::V1), (2, schema::V2), (3, schema::V3)] {
                 if found < version {
                     tx.execute_batch(step)?;
                 }

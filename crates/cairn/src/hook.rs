@@ -40,7 +40,7 @@ impl Agent {
     }
 }
 
-// Unknown values (including prompt, last_assistant_message and transcript_path)
+// Unknown values (including prompt and last_assistant_message)
 // are skipped by serde, never retained in metadata or forwarded to the core.
 #[derive(Deserialize)]
 struct Envelope {
@@ -53,7 +53,7 @@ struct Metadata {
     source: Option<String>,
     prompt_id: Option<String>,
     turn_id: Option<String>,
-    stop_hook_active: Option<bool>,
+    transcript_path: Option<String>,
     reason: Option<String>,
 }
 
@@ -64,16 +64,8 @@ fn database_path() -> crate::store::Result<PathBuf> {
     )
 }
 
-fn allow(agent: Agent, event: Option<&str>) -> String {
-    if matches!(agent, Agent::Codex) && matches!(event, Some("Stop") | None) {
-        "{}".into()
-    } else {
-        String::new()
-    }
-}
-
 /// Production resolves the system private spool root; run_at supplies isolated
-/// paths. This boundary always returns a successful, agent-specific response.
+/// paths. This boundary always returns a successful response; only SessionStart injects output.
 pub fn run(agent: Agent, input: &mut impl Read, paths: Option<(&Path, &Path)>) -> String {
     let disabled = std::env::var_os("CAIRN_DISABLE").is_some_and(|v| v == "1");
     let mut bytes = Vec::new();
@@ -81,7 +73,7 @@ pub fn run(agent: Agent, input: &mut impl Read, paths: Option<(&Path, &Path)>) -
     let envelope = serde_json::from_slice::<Envelope>(&bytes);
     let event = envelope.as_ref().ok().map(|e| e.hook_event_name.clone());
     if disabled {
-        return allow(agent, event.as_deref());
+        return String::new();
     }
     let result = (|| -> crate::cli::Result<String> {
         read?;
@@ -111,7 +103,7 @@ pub fn run(agent: Agent, input: &mut impl Read, paths: Option<(&Path, &Path)>) -
             error_category(error.as_ref()),
             paths.map(|(db, _)| db),
         );
-        allow(agent, event.as_deref())
+        String::new()
     })
 }
 
@@ -131,6 +123,7 @@ fn dispatch(
             Some("resume") => StartKind::Resume,
             Some("clear") => StartKind::Clear,
             Some("compact") => StartKind::Compact,
+            Some("fork") => StartKind::Fork,
             _ => StartKind::Other,
         };
         return Ok(crate::session::start(
@@ -140,6 +133,7 @@ fn dispatch(
                 agent: agent.name(),
                 session_id: &metadata.session_id,
                 cwd: &metadata.cwd,
+                transcript_path: metadata.transcript_path.as_deref(),
                 start_kind,
                 now,
             },
@@ -164,10 +158,10 @@ fn dispatch(
     let scope = git.resolve(&metadata.cwd)?;
     let at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let context = crate::turn::Context {
-        command: &command,
         database,
         spool_root: root,
-        project_key: &scope.project_key,
+        scope: &scope,
+        transcript_path: metadata.transcript_path.as_deref(),
         agent: agent.core(),
         session_id: &metadata.session_id,
         at: &at,
@@ -179,24 +173,14 @@ fn dispatch(
     };
     let report = match event {
         "UserPromptSubmit" => crate::turn::turn_started(context, key),
-        "Stop" => {
-            let continued = metadata.stop_hook_active.ok_or_else(|| {
-                <serde_json::Error as serde::de::Error>::missing_field("stop_hook_active")
-            })?;
-            crate::turn::turn_ended(context, key, continued)
-        }
+        "Stop" => crate::turn::turn_ended(context),
         "SessionEnd" => crate::turn::session_ended(context, metadata.reason.as_deref()),
         _ => unreachable!(),
     };
     if let Some(error) = report.errors.into_iter().next() {
         return Err(error.into());
     }
-    Ok(match report.action {
-        crate::turn::Action::Continue { reason } => {
-            json!({"decision":"block", "reason":reason}).to_string()
-        }
-        crate::turn::Action::Allow => allow(agent, Some(event)),
-    })
+    Ok(String::new())
 }
 
 // Never format foreign error messages: serde may quote an invalid value and
@@ -225,7 +209,8 @@ fn error_category(error: &(dyn std::error::Error + 'static)) -> &'static str {
         return match error {
             crate::turn::Error::Store(_) | crate::turn::Error::Sqlite(_) => "database",
             crate::turn::Error::Spool(_) => "spool",
-            crate::turn::Error::Ingest(_) | crate::turn::Error::PendingUnknown => "ingest",
+            crate::turn::Error::Ingest(_) => "ingest",
+            crate::turn::Error::Git(error) => error_category(error),
             _ => "core",
         };
     }
