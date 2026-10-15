@@ -16,7 +16,7 @@
   - cairn 不判断谁是主控，只认 `CAIRN_DISABLE=1`。ranch（`corral`、`corral-dispatch` 技能）开 agent 时带这个变量，cairn 只留给用户直接对话的主控；其余方式开的 agent，只要目录已采用就会用 cairn。
   - 10-15 前开的会话，开局拿到的是旧约定（每回合 `cairn save`），重开后才没有；它们存的按新规则成为版本。paddock/main 已通知停止每回合保存。
 - **paddock 已经在用 cairn**：右侧栏 Cairn 标签（paddock P5-55）调用 `cairn status --json`、`cairn show --json`、`cairn adopt`，面板开着时每 5 秒读一次（`show` 会顺手收取暂存区）；P5-78、P5-79 用 `last_seen`、`cairn list --json`、`cairn show <ID> --json`（由 paddock 主控做，进度看 paddock 的 HANDOFF）。这些输出是公开约定，动之前先看 DESIGN §7.1。
-- 开着的 dev agent：`cairn/dev-ledger-base-1`（P1-15，worktree `../cairn-worktrees/p1-15-ledger-base`，分支 `p1-15-ledger-base`）。没有别的未清理的 worktree 或分支；`cairn-worktrees/` 下只有编译目录 `.target`（每个工作目录用 `.target/<子目录>`）和 `p1-lab`。
+- 开着的 dev agent：`cairn/dev-ledger-sidecar-1`（P1-16，worktree `../cairn-worktrees/p1-16-ledger-sidecar`，分支 `p1-16-ledger-sidecar`；Codex 带 `--disable memories`）。没有别的未清理的 worktree 或分支；`cairn-worktrees/` 下只有编译目录 `.target`（每个工作目录用 `.target/<子目录>`）和 `p1-lab`。
 - 记忆系统（P1-01）只有设计草案，没生效：`docs/记忆系统设计草案.md`（第 12 节八个问题待定）、草稿任务 `docs/任务/P1-01-扩展成一个完整的记忆系统.md`、调研 `docs/调研/agent记忆系统现状.md`。用户 10-11 定的五条：就在本仓库里长、仍是独立程序；cairn 自己先不调用模型；自我改进先做到“经验逐条沉淀、逐条更新”；共享先做同项目里 Claude Code 和 Codex 之间、再做跨项目；P1-01 只出设计，实现另拆。草案的 M2 10-13 加注要重谈（旁路模型路线之后）。
 - 以下是 10-07 之前各阶段的情况（没变）：
   - **阶段 1（能力实测）已完成**：门槛 A、B、C、F 在 Claude Code 2.1.289 和 Codex 0.160.0 上满足本次实测范围。报告：`docs/调研/第一阶段能力实测.md`；任务与审查记录：`docs/tasks/P1-*.md`。
@@ -40,7 +40,7 @@
 0. **和用户详细讨论记忆系统设计草案**：先定“智能”指什么（指望 cairn 自己做哪件事，可能改 M2）和草案 §1.2 的定位（用户没表态），再逐条过第 12 节的八个问题（主控给第 4、7、8 问补过建议）。谈定的部分并进 `docs/DESIGN.md`（D2、§6.3 末句、§7 受限入口、§13“不做”要动），再拆实现任务；第一期开工前先做一次小实测（第二个 agent 可用的命令在两家的权限和沙箱下走不走得通）。
 1. **看试点**：10-24 前后用户回看 paddock 的试点。
 2. **paddock 还想要、没做的**（见 `docs/调研/与paddock结合.md`，开不开工由用户定）：`show --json`（不带 ID）分节。做的时候按 §7.1 的“只加不改”来，新字段写进 §7.1。
-3. **三件任务**（10-15 用户让记下）：P1-11 旁路摘要先判断值不值得写（**已合并，0.4.1 已装**，用户：“安装。”；paddock 面板文字里的 “each session” 现在不太准，用户介意再让 paddock/main 去掉）；以下两件是草稿、没派，开不开工由用户定：P1-12 `show --json` 区分全文和一行（可以和第 2 条一起看）；P1-13 把 HANDOFF 的项目账搬进 cairn 做长期记忆：**设计草案 `docs/长期记忆设计草案.md` 已和用户谈定**（§1.1 L1–L12，验收 §11 五条），已并进 DESIGN，拆成 P1-14（9,000 字符小测，已合并：Codex `additionalContextLimit` 改 12000，Claude 不补测，见 DESIGN §9.1）、P1-15（存储、命令、注入，开发中，含 limit 改 12000）、P1-16（旁路模型记账，P1-15 合并后再派）。三件都合并后再装：先问用户；schema 升到 4 回不去，装前备份数据库；Codex hook 定义变了要重新安装、到 `/hooks` 重新信任。之后让 paddock/main 加账的展示，再由 agent 带着用户把 HANDOFF 规整进账、并行用一阵，最后去掉 AGENTS 里维护 HANDOFF 的规矩。它取代了第 0 条里“项目的账”那部分；第 0 条剩下的经验手册、全局记忆以后另议。用户先试用 0.4.0 一段时间。
+3. **三件任务**（10-15 用户让记下）：P1-11 旁路摘要先判断值不值得写（**已合并，0.4.1 已装**，用户：“安装。”；paddock 面板文字里的 “each session” 现在不太准，用户介意再让 paddock/main 去掉）；以下两件是草稿、没派，开不开工由用户定：P1-12 `show --json` 区分全文和一行（可以和第 2 条一起看）；P1-13 把 HANDOFF 的项目账搬进 cairn 做长期记忆：**设计草案 `docs/长期记忆设计草案.md` 已和用户谈定**（§1.1 L1–L12，验收 §11 五条），已并进 DESIGN，拆成 P1-14（9,000 字符小测，已合并：Codex `additionalContextLimit` 改 12000，Claude 不补测，见 DESIGN §9.1）、P1-15（存储、命令、注入，含 limit 改 12000，已合并，main 上还没装）、P1-16（旁路模型记账，开发中）。三件都合并后再装：先问用户；schema 升到 4 回不去，装前备份数据库；Codex hook 定义变了要重新安装、到 `/hooks` 重新信任。之后让 paddock/main 加账的展示，再由 agent 带着用户把 HANDOFF 规整进账、并行用一阵，最后去掉 AGENTS 里维护 HANDOFF 的规矩。它取代了第 0 条里“项目的账”那部分；第 0 条剩下的经验手册、全局记忆以后另议。用户先试用 0.4.0 一段时间。
 
 ## 悬而未决
 
@@ -50,7 +50,7 @@
 - 并进 DESIGN 时主控自定、用户没表态的八处：版本用取代关系；注入最近 3 个会话的全文、更早的各最多 10 行；连着两次没写成不再自动试；模型做成设置，默认 `gpt-5.6-luna` / `medium`；抬头一行来源 ID；Git 事实在回合结束时采；长会话喂“上一版 + 新增”；表结构。
 - 同一个目录并排跑两个做不同任务的 agent：摘要一个会话一份不混，开局两份并排给出，现场对比分不清是谁改的。主控建议先不加东西，用户没表态。
 - 来源的最后一条记录被取代后，注入退回显示它更早的记录（10-12 观察到），改不改由用户定。要动先看 D9 和 §8.1，在隔离目录用合成输入复现。
-- P1-02 调研报告按官方文档写 Codex memories 默认关闭，本机 `codex features list` 显示 `memories stable true`，原因没查。 10-15 P1-14 的 Codex agent 开局检索了一次 `~/.codex/memories/MEMORY.md`（越过“不读工具自带的记忆文件”，已披露）；派出的 Codex 怎么关掉记忆，主控在查。
+- P1-02 调研报告按官方文档写 Codex memories 默认关闭，本机 `codex features list` 显示 `memories stable true`，原因没查。 10-15 P1-14 的 Codex agent 开局检索了一次 `~/.codex/memories/MEMORY.md`（越过“不读工具自带的记忆文件”，已披露）；P1-15 的 Codex agent 也读过（第 228–251 行）。办法：Codex 启动时加 `--disable memories`（只管这一个会话，不改配置；已实测 `features list` 显示 false）。P1-15 的审查者、P1-16 起已加上；写进 AGENTS.md 还是 corral-dispatch 技能，等用户定。
 - P1-04 实测的遗留物，删不删由用户定：`cairn-worktrees/p1-lab/sidecar/`（约 23 MB，含测试会话记录的副本，都是合成内容）；`p1-lab` 两个仓库里各一份 `*.before-sidecar-20261012` 配置备份；两家工具自己保留的 7 个测试会话的记录。
 - P1-05 实测的遗留物，删不删由用户定：`cairn-worktrees/p1-lab/midturn/`（脚本、日志、两个测试会话记录的副本，都是合成内容）；`p1-lab` 两个仓库里各一份 `*.before-midturn-20261013` 配置备份；两家工具自己保留的测试会话记录。
 - P1-14 实测的遗留物，删不删由用户定：`cairn-worktrees/p1-lab/budget/`（脚本、合成样例、日志、结果）；`p1-lab` 两个仓库里各一份 `*.before-budget-20261015` 配置备份；两家工具自己保留的 3 个测试会话的记录。
