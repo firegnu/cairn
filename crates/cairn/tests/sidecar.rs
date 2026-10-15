@@ -302,6 +302,178 @@ stat -f '%Lp' .. > "$SIDECAR_TEST_DIR/outer-mode"
 }
 
 #[test]
+fn summarize_skip_advances_progress_without_records_or_failures() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic-small-talk");
+    f.fake_codex("", "invalid-summary");
+    assert!(!f.run(&["summarize"], "").status.success());
+    f.fake_codex("", " \nNOTHING_TO_CONTINUE\n\t");
+    let output = f.ok(&["summarize"], "");
+    assert!(output.contains("不用写"), "{output}");
+    assert_eq!(f.records(true)["total"], 0);
+    let store = f.store();
+    let (bytes, turns, failures, cleared): (i64, i64, i64, bool) = store
+        .connection()
+        .query_row(
+            "SELECT summarized_bytes,summarized_turns,failures,
+         summary_record_id IS NULL AND last_failure IS NULL AND last_failure_at IS NULL
+         AND waiter_id IS NULL AND waiter_beat_at IS NULL
+         FROM sessions WHERE source_id='claude:one'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        bytes as u64,
+        fs::metadata(f.path("one.jsonl")).unwrap().len()
+    );
+    assert_eq!(turns, 1);
+    assert!(cleared);
+    assert_eq!(failures, 0);
+}
+
+#[test]
+fn skipped_sessions_preserve_previous_summary_and_resume_on_new_turns() {
+    for has_previous in [false, true] {
+        let f = Fixture::new();
+        f.ok(&["adopt"], "");
+        f.session("one", "synthetic-small-talk");
+        if has_previous {
+            f.fake_codex("", "## 停点\nprevious-summary");
+            f.ok(&["summarize"], "");
+            fs::OpenOptions::new()
+                .append(true)
+                .open(f.path("one.jsonl"))
+                .unwrap()
+                .write_all(dialogue("more-small-talk").as_bytes())
+                .unwrap();
+            f.hook("one", "UserPromptSubmit");
+        }
+        let before = f.records(true);
+        f.fake_codex(
+            r#"case "$input" in *'先判断：下一个会话接着干活时'*'NOTHING_TO_CONTINUE'*'用得上时，只输出 Markdown'*) ;; *) exit 83 ;; esac"#,
+            "NOTHING_TO_CONTINUE",
+        );
+        f.ok(&["summarize"], "");
+        assert_eq!(f.records(true), before);
+        assert_eq!(f.records(false)["total"], u64::from(has_previous));
+        let show = f.ok(&["show"], "");
+        assert!(
+            !show.contains("还没有摘要") && !show.contains("还没写进摘要"),
+            "{show}"
+        );
+        assert!(
+            !show.contains("可重试") && !show.contains("尚未写摘要"),
+            "{show}"
+        );
+        if has_previous {
+            assert!(show.contains("previous-summary"));
+        }
+        let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+        assert_eq!(status["sidecar"]["unsummarized_sessions"], 0);
+        assert!(f.ok(&["status"], "").contains("还没有摘要的会话：0"));
+        fs::remove_file(f.path("cwd")).unwrap();
+        assert!(f.ok(&["summarize"], "").contains("没有需要"));
+        assert!(!f.path("cwd").exists());
+
+        fs::OpenOptions::new()
+            .append(true)
+            .open(f.path("one.jsonl"))
+            .unwrap()
+            .write_all(dialogue("useful-new-turn").as_bytes())
+            .unwrap();
+        f.hook("one", "UserPromptSubmit");
+        let show = f.ok(&["show"], "");
+        assert!(
+            show.contains(if has_previous {
+                "还没写进摘要"
+            } else {
+                "还没有摘要"
+            }),
+            "{show}"
+        );
+        let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+        assert_eq!(
+            status["sidecar"]["unsummarized_sessions"],
+            u64::from(!has_previous)
+        );
+        let checks = if has_previous {
+            r#"case "$input" in *'上一版摘要'*'previous-summary'*'会话摘录'*'useful-new-turn'*) ;; *) exit 84 ;; esac
+case "$input" in *'user: synthetic-small-talk'*|*'user: more-small-talk'*) exit 85 ;; esac"#
+        } else {
+            r#"case "$input" in *'user: synthetic-small-talk'*'user: useful-new-turn'*) ;; *) exit 84 ;; esac"#
+        };
+        f.fake_codex(checks, "## 停点\nuseful-summary");
+        f.ok(&["summarize"], "");
+        let records = f.records(false);
+        assert_eq!(records["total"], 1);
+        assert_eq!(records["records"][0]["summary"], "useful-summary");
+        assert_eq!(f.records(true)["total"], 1 + u64::from(has_previous));
+    }
+}
+
+#[test]
+fn waiter_skip_is_processed_and_session_start_injects_no_missing_summary() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic-small-talk");
+    f.hook("one", "SessionEnd");
+    f.fake_codex("", "NOTHING_TO_CONTINUE");
+    let database = f.path("state/cairn/cairn.db");
+    let args = [
+        "__wait",
+        "--database",
+        database.to_str().unwrap(),
+        "--root",
+        f.0.path().to_str().unwrap(),
+        "--source",
+        "claude:one",
+    ];
+    f.ok(&args, "");
+    assert_eq!(f.records(true)["total"], 0);
+    fs::remove_file(f.path("cwd")).unwrap();
+    f.ok(&args, "");
+    assert!(
+        !f.path("cwd").exists(),
+        "processed session was sent to the model again"
+    );
+    let injected = f.ok(
+        &["hook", "claude"],
+        &serde_json::json!({
+            "hook_event_name":"SessionStart", "session_id":"new", "cwd":f.path("project")
+        })
+        .to_string(),
+    );
+    assert!(
+        !injected.contains("还没有摘要") && !injected.contains("还没写进摘要"),
+        "{injected}"
+    );
+    assert!(
+        !injected.contains("最近一次没写成") && !injected.contains("摘要正在写"),
+        "{injected}"
+    );
+    let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+    assert_eq!(status["sidecar"]["unsummarized_sessions"], 0);
+    assert!(status["sidecar"]["last_failure"].is_null());
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(f.path("one.jsonl"))
+        .unwrap()
+        .write_all(dialogue("useful-new-turn").as_bytes())
+        .unwrap();
+    f.hook("one", "UserPromptSubmit");
+    f.hook("one", "SessionEnd");
+    f.fake_codex("", "## 停点\nbackground-summary");
+    f.ok(&args, "");
+    assert_eq!(
+        f.records(false)["records"][0]["summary"],
+        "background-summary"
+    );
+}
+
+#[test]
 fn save_during_generation_keeps_its_visibility_and_rejects_stale_summary() {
     for has_previous in [false, true] {
         let f = Fixture::new();
