@@ -50,7 +50,7 @@
 - 并进 DESIGN 时主控自定、用户没表态的八处：版本用取代关系；注入最近 3 个会话的全文、更早的各最多 10 行；连着两次没写成不再自动试；模型做成设置，默认 `gpt-5.6-luna` / `medium`；抬头一行来源 ID；Git 事实在回合结束时采；长会话喂“上一版 + 新增”；表结构。
 - 同一个目录并排跑两个做不同任务的 agent：摘要一个会话一份不混，开局两份并排给出，现场对比分不清是谁改的。主控建议先不加东西，用户没表态。
 - 来源的最后一条记录被取代后，注入退回显示它更早的记录（10-12 观察到），改不改由用户定。要动先看 D9 和 §8.1，在隔离目录用合成输入复现。
-- P1-02 调研报告按官方文档写 Codex memories 默认关闭，本机 `codex features list` 显示 `memories stable true`，原因没查。 10-15 P1-14 的 Codex agent 开局检索了一次 `~/.codex/memories/MEMORY.md`（越过“不读工具自带的记忆文件”，已披露）；P1-15 的 Codex agent 也读过（第 228–251 行）。办法：Codex 启动时加 `--disable memories`（只管这一个会话，不改配置；已实测 `features list` 显示 false）。P1-15 的审查者、P1-16 起已加上；10-16 用户定写进 corral-dispatch 技能（所有项目派出去的 Codex 都加），ranch c4bf688 已改、已装（两份已安装副本核对过）。corral 技能（只问问题的那条路）要不要也加，ranch/main 在和用户商量，cairn 主控回复同意。
+- P1-02 调研报告按官方文档写 Codex memories 默认关闭，本机 `codex features list` 显示 `memories stable true`，原因没查。 10-15 P1-14 的 Codex agent 开局检索了一次 `~/.codex/memories/MEMORY.md`（越过“不读工具自带的记忆文件”，已披露）；P1-15 的 Codex agent 也读过（第 228–251 行）。办法：Codex 启动时加 `--disable memories`（只管这一个会话，不改配置；已实测 `features list` 显示 false）。P1-15 的审查者、P1-16 起已加上；10-16 用户定写进 corral-dispatch 技能（所有项目派出去的 Codex 都加），ranch c4bf688 已改、已装（两份已安装副本核对过）。corral 技能（只问问题的那条路）也已加上（ranch 14fb8d9，已装；用户明确要带记忆时才去掉）。这一条只剩官方文档和本机默认不一致的原因没查。
 - P1-04 实测的遗留物，删不删由用户定：`cairn-worktrees/p1-lab/sidecar/`（约 23 MB，含测试会话记录的副本，都是合成内容）；`p1-lab` 两个仓库里各一份 `*.before-sidecar-20261012` 配置备份；两家工具自己保留的 7 个测试会话的记录。
 - P1-05 实测的遗留物，删不删由用户定：`cairn-worktrees/p1-lab/midturn/`（脚本、日志、两个测试会话记录的副本，都是合成内容）；`p1-lab` 两个仓库里各一份 `*.before-midturn-20261013` 配置备份；两家工具自己保留的测试会话记录。
 - P1-14 实测的遗留物，删不删由用户定：`cairn-worktrees/p1-lab/budget/`（脚本、合成样例、日志、结果）；`p1-lab` 两个仓库里各一份 `*.before-budget-20261015` 配置备份；两家工具自己保留的 3 个测试会话的记录。
