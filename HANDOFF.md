@@ -17,7 +17,7 @@
   - cairn 不判断谁是主控，只认 `CAIRN_DISABLE=1`。ranch（`corral`、`corral-dispatch` 技能）开 agent 时带这个变量，cairn 只留给用户直接对话的主控；其余方式开的 agent，只要目录已采用就会用 cairn。
   - 10-15 前开的会话，开局拿到的是旧约定（每回合 `cairn save`），重开后才没有；它们存的按新规则成为版本。paddock/main 已通知停止每回合保存。
 - **paddock 已经在用 cairn**：右侧栏 Cairn 标签（paddock P5-55）调用 `cairn status --json`、`cairn show --json`、`cairn adopt`，面板开着时每 5 秒读一次（`show` 会顺手收取暂存区）；P5-78、P5-79 用 `last_seen`、`cairn list --json`、`cairn show <ID> --json`（由 paddock 主控做，进度看 paddock 的 HANDOFF）。这些输出是公开约定，动之前先看 DESIGN §7.1。
-- 现在没有开着的 dev / test agent，没有未清理的 worktree 或分支；`cairn-worktrees/` 下只有编译目录 `.target`（每个工作目录用 `.target/<子目录>`）和 `p1-lab`。
+- 开着：`cairn/dev-lesson-1`（Codex 重档，P1-20 经验沉淀实现），worktree `../cairn-worktrees/p1-20-lesson`、分支 `p1-20-lesson`（10-16 派）。`cairn-worktrees/` 下另有编译目录 `.target`（每个工作目录用 `.target/<子目录>`）和 `p1-lab`。
 - 记忆系统（P1-01）只有设计草案，没生效：`docs/记忆系统设计草案.md`（第 12 节八个问题待定）、草稿任务 `docs/任务/P1-01-扩展成一个完整的记忆系统.md`、调研 `docs/调研/agent记忆系统现状.md`。用户 10-11 定的五条：就在本仓库里长、仍是独立程序；cairn 自己先不调用模型；自我改进先做到“经验逐条沉淀、逐条更新”；共享先做同项目里 Claude Code 和 Codex 之间、再做跨项目；P1-01 只出设计，实现另拆。草案的 M2 10-13 加注要重谈（旁路模型路线之后）。
 - 以下是 10-07 之前各阶段的情况（没变）：
   - **阶段 1（能力实测）已完成**：门槛 A、B、C、F 在 Claude Code 2.1.289 和 Codex 0.160.0 上满足本次实测范围。报告：`docs/调研/第一阶段能力实测.md`；任务与审查记录：`docs/tasks/P1-*.md`。
@@ -44,7 +44,7 @@
 3. **三件任务**（10-15 用户让记下）：P1-11 旁路摘要先判断值不值得写（**已合并，0.4.1 已装**，用户：“安装。”；paddock 面板文字里的 “each session” 现在不太准，用户介意再让 paddock/main 去掉）；以下两件是草稿、没派，开不开工由用户定：P1-12 `show --json` 区分全文和一行（可以和第 2 条一起看）；P1-13 把 HANDOFF 的项目账搬进 cairn 做长期记忆：**设计草案 `docs/长期记忆设计草案.md` 已和用户谈定**（§1.1 L1–L12，验收 §11 五条），已并进 DESIGN，拆成 P1-14（9,000 字符小测，已合并：Codex `additionalContextLimit` 改 12000，Claude 不补测，见 DESIGN §9.1）、P1-15（存储、命令、注入，含 limit 改 12000）、P1-16（旁路模型记账）都已合并，**10-16 已装（0.5.0）**；P1-13 标为开发完成、验收中（§11 五条，进度在任务文件末尾）。**三期 10-16 已开始**：cairn 的 HANDOFF 已规整成 25 条写进账（用户：“写吧”；`cairn ledger` 查看），注入实测（Codex 新会话）收全；接着和 HANDOFF 并行用一周左右，一周后用户再定四期。10-16 用户让主控直接通知：paddock/main 在面板加账的展示（约定 §7.1），并把 paddock 的 HANDOFF 规整进账；ranch/main 规整 ranch 的 HANDOFF（ranch 早已采用，不用 adopt；10-16 已写进 17 条）；两家都照 cairn 的打样做、并行一周、HANDOFF 和 AGENTS 规矩先不动（进度看它们自己）。owlet 先不接：用户 10-16“我现在主要是你们三个库。先稳定跑着。之后再说其他的”。之后最后去掉 AGENTS 里维护 HANDOFF 的规矩。它取代了第 0 条里“项目的账”那部分；第 0 条剩下的经验手册、全局记忆以后另议。用户先试用 0.4.0 一段时间。
 4. **P1-17 适配 pi、omp、amp、agy 等 harness**（10-16 用户让记下，草稿、没派）：`docs/任务/P1-17-适配pi-omp-amp-agy等harness.md`。主控建议先调研各家 hook 能力，再由用户定接哪几家；开不开工由用户定。
 5. **P1-18 并行一段时间后删除 HANDOFF**（10-16 用户让记下，草稿、没派）：`docs/任务/P1-18-并行一段时间后删除HANDOFF.md`，即长期记忆的四期。用户：“明白了，那就并行一周后再说。”
-6. **P1-19 经验沉淀**（10-16 用户让记下，草稿、没派）：`docs/任务/P1-19-经验沉淀.md`。用户 10-16 定：cairn 只管项目里的记忆（会话记忆、长期记忆、经验沉淀），全局记忆就是各工具的全局配置文件，不归 cairn；在 paddock 设定里显示、编辑各 agent 全局设定，10-16 已通知 paddock/main（进度看 paddock）。10-16 设计草案已起草：`docs/经验沉淀设计草案.md`（§1.1 E1–E9 已定，§11 待定）。
+6. **P1-19 经验沉淀**（10-16 用户让记下，草稿、没派）：`docs/任务/P1-19-经验沉淀.md`。用户 10-16 定：cairn 只管项目里的记忆（会话记忆、长期记忆、经验沉淀），全局记忆就是各工具的全局配置文件，不归 cairn；在 paddock 设定里显示、编辑各 agent 全局设定，10-16 已通知 paddock/main（进度看 paddock）。10-16 设计已谈定（`docs/经验沉淀设计草案.md` E1–E16，验收 §12 六条），已并进 DESIGN D15；实现 P1-20 已派给 Codex。
 
 ## 悬而未决
 
