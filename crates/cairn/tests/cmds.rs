@@ -16,6 +16,58 @@ fn ledger_json(f: &Fixture, args: &[&str]) -> Value {
 }
 
 #[test]
+fn lesson_commands_group_after_ledger_and_support_correction_and_restore() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "").unwrap();
+    for (kind, title) in [
+        ("lesson", "工具教训"),
+        ("convention", "约定"),
+        ("open", "问题"),
+        ("state", "现状"),
+        ("lesson", "编译教训"),
+    ] {
+        f.run(&["ledger", "add", kind, title], "合成正文").unwrap();
+    }
+    let list = ledger_json(&f, &["ledger", "--json"]);
+    let items = list["items"].as_array().unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|i| i["no"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [4, 3, 2, 1, 5]
+    );
+    assert_eq!(items[3]["kind"], "lesson");
+    for args in [vec!["ledger"], vec!["ledger", "export"]] {
+        let text = f.run(&args, "").unwrap();
+        assert!(text.find("## 约定").unwrap() < text.find("## 经验").unwrap());
+        assert!(text.contains("#1 工具教训") && text.contains("#5 编译教训"));
+    }
+    f.run(
+        &["ledger", "edit", "1", "--title", "纠正的教训"],
+        "纠正正文",
+    )
+    .unwrap();
+    f.run(&["ledger", "close", "1", "条件不再成立"], "")
+        .unwrap();
+    assert!(!f
+        .run(&["ledger", "export"], "")
+        .unwrap()
+        .contains("纠正的教训"));
+    f.run(&["ledger", "reopen", "1"], "").unwrap();
+    let detail = ledger_json(&f, &["ledger", "show", "1", "--json"]);
+    assert_eq!(detail["item"]["kind"], "lesson");
+    assert_eq!(detail["item"]["status"], "active");
+    assert_eq!(detail["item"]["body"], "纠正正文");
+    assert_eq!(detail["changes"][1]["close_reason"], "条件不再成立");
+    assert_eq!(detail["changes"][2]["before_title"], "工具教训");
+    assert!(f
+        .run(&["ledger", "export"], "")
+        .unwrap()
+        .contains("纠正的教训"));
+}
+
+#[test]
 fn ledger_commands_keep_history_restore_items_and_export_by_kind() {
     let f = Fixture::new();
     assert_eq!(

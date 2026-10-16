@@ -22,6 +22,7 @@ pub enum Kind {
     State,
     Open,
     Convention,
+    Lesson,
 }
 
 impl Kind {
@@ -30,6 +31,7 @@ impl Kind {
             Self::State => "state",
             Self::Open => "open",
             Self::Convention => "convention",
+            Self::Lesson => "lesson",
         }
     }
 }
@@ -103,6 +105,8 @@ pub(crate) struct Failure {
     pub reason: Option<String>,
     #[serde(skip)]
     pub line_path: String,
+    #[serde(skip)]
+    pub partial: bool,
 }
 
 /// Read observations only. The sidecar task will own resetting/writing them.
@@ -112,15 +116,20 @@ pub(crate) fn failures(c: &Connection, key: &str) -> Result<Vec<Failure>> {
     }
     let mut query = c.prepare(
         "SELECT s.source_id,s.ledger_last_failure_at,s.ledger_last_failure,s.line_path
-        FROM sessions s JOIN projects p ON p.id=s.project_id WHERE p.key=?1 AND s.ledger_failures>0
+        FROM sessions s JOIN projects p ON p.id=s.project_id WHERE p.key=?1 AND (s.ledger_failures>0 OR s.ledger_last_failure LIKE '经验没写成：%')
         ORDER BY s.ledger_last_failure_at DESC,s.source_id",
     )?;
     let rows = query.query_map([key], |r| {
+        let reason: Option<String> = r.get(2)?;
+        let partial = reason
+            .as_deref()
+            .is_some_and(|s| s.starts_with("经验没写成："));
         Ok(Failure {
             source_id: r.get(0)?,
             at: r.get(1)?,
-            reason: r.get(2)?,
+            reason,
             line_path: r.get(3)?,
+            partial,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -148,7 +157,7 @@ pub(crate) fn read(c: &Connection, key: &str, all: bool) -> Result<Ledger> {
         .unwrap_or(0);
     let mut query = c.prepare("SELECT i.id,i.no,i.kind,i.title,i.body,i.status,i.created_at,i.created_by,i.updated_at,i.closed_at,i.close_reason,i.deleted_at
         FROM items i JOIN projects p ON p.id=i.project_id WHERE p.key=?1 AND (?2 OR (i.status='active' AND i.deleted_at IS NULL))
-        ORDER BY CASE i.kind WHEN 'state' THEN 0 WHEN 'open' THEN 1 WHEN 'convention' THEN 2 ELSE 3 END,i.no")?;
+        ORDER BY CASE i.kind WHEN 'state' THEN 0 WHEN 'open' THEN 1 WHEN 'convention' THEN 2 WHEN 'lesson' THEN 3 ELSE 4 END,i.no")?;
     let items = query
         .query_map(params![key, all], |r| {
             Ok(Item {
@@ -194,6 +203,8 @@ pub(crate) struct Change {
     pub no: i64,
     pub title: String,
     pub body: Option<String>,
+    #[serde(skip)]
+    pub kind: String,
 }
 
 /// Newest first. Walk edits backwards to reconstruct the content at each change;
@@ -202,7 +213,7 @@ pub(crate) fn changes(c: &Connection, key: &str, since: i64) -> Result<Vec<Chang
     if !available(c)? {
         return Ok(vec![]);
     }
-    let mut query = c.prepare("SELECT h.id,h.item_id,h.action,h.by,h.evidence,h.before_title,h.before_body,h.close_reason,h.ledger_version,h.at,i.no,i.title,i.body
+    let mut query = c.prepare("SELECT h.id,h.item_id,h.action,h.by,h.evidence,h.before_title,h.before_body,h.close_reason,h.ledger_version,h.at,i.no,i.title,i.body,i.kind
         FROM item_changes h JOIN items i ON i.id=h.item_id JOIN projects p ON p.id=i.project_id
         WHERE p.key=?1 AND h.ledger_version>?2 ORDER BY h.id DESC")?;
     let mut changes = query
@@ -221,6 +232,7 @@ pub(crate) fn changes(c: &Connection, key: &str, since: i64) -> Result<Vec<Chang
                 no: r.get(10)?,
                 title: r.get(11)?,
                 body: r.get(12)?,
+                kind: r.get(13)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -245,6 +257,7 @@ pub(crate) fn kind_label(kind: &str) -> &str {
         "state" => "现状",
         "open" => "悬而未决",
         "convention" => "约定",
+        "lesson" => "经验",
         _ => kind,
     }
 }

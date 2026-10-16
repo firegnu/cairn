@@ -222,12 +222,22 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
         ));
     }
     text.push_str(&format!(
-        "项目记账没写成的会话：{}\n",
+        "项目记账{}的会话：{}\n",
+        if ledger_failures.iter().any(|f| f.partial) {
+            "有内容没写成"
+        } else {
+            "没写成"
+        },
         ledger_failures.len()
     ));
     if let Some(failure) = ledger_failures.first() {
         text.push_str(&format!(
-            "记账最近一次没写成：{}（{}）：{}\n",
+            "记账最近一次{}：{}（{}）：{}\n",
+            if failure.partial {
+                "有内容没写成"
+            } else {
+                "没写成"
+            },
             failure.source_id,
             failure.at.as_deref().unwrap_or("时间未记录"),
             failure.reason.as_deref().unwrap_or("原因未记录")
