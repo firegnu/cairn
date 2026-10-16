@@ -568,14 +568,18 @@ fn write_ledger(
         let tx = store.transaction(rusqlite::TransactionBehavior::Deferred)?;
         let ledger = crate::ledger::read(&tx, &session.project_key, true)?;
         tx.commit()?;
-        let output = generate(
-            store.connection(),
-            root,
-            &prompt(&ledger, &excerpt.text),
-            lease,
-            timing,
-            OUTPUT_LIMIT,
-        )?;
+        let output = if excerpt.has_dialogue {
+            generate(
+                store.connection(),
+                root,
+                &prompt(&ledger, &excerpt.text),
+                lease,
+                timing,
+                OUTPUT_LIMIT,
+            )?
+        } else {
+            "NO_CHANGES".to_owned()
+        };
         let batch = parse(&output, &ledger)?;
         let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
         if !lease.heartbeat(&tx, Utc::now())? {
@@ -644,14 +648,18 @@ fn write_summary(
         }
     }
     prompt.push_str(&format!("\n会话摘录\n{}", excerpt.text));
-    let body = generate(
-        store.connection(),
-        root,
-        &prompt,
-        lease,
-        timing,
-        crate::save::BODY_LIMIT,
-    )?;
+    let body = if excerpt.has_dialogue {
+        generate(
+            store.connection(),
+            root,
+            &prompt,
+            lease,
+            timing,
+            crate::save::BODY_LIMIT,
+        )?
+    } else {
+        "NOTHING_TO_CONTINUE".to_owned()
+    };
     let skip = body.trim() == "NOTHING_TO_CONTINUE";
     if !skip {
         crate::save::validate_body(&body).map_err(|error| format!("输出不合格：{error}"))?;

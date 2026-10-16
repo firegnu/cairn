@@ -143,10 +143,10 @@ fn shorter_file_restarts_but_equal_length_does_not_replay_old_dialogue() {
         assert!(excerpt.restarted);
         assert_eq!(excerpt.text, "user: 重写后\n");
         assert_eq!(excerpt.end_offset, input.len() as u64);
-        assert!(matches!(
-            extract(agent, &path, input.len() as u64),
-            Err(Error::NoDialogue)
-        ));
+        let excerpt = extract(agent, &path, input.len() as u64).unwrap();
+        assert!(!excerpt.has_dialogue);
+        assert!(excerpt.text.is_empty());
+        assert_eq!(excerpt.end_offset, input.len() as u64);
     }
 }
 
@@ -198,10 +198,9 @@ fn unknown_rows_advance_offset_but_tools_and_empty_messages_are_not_dialogue() {
         let excerpt = extract(agent, &path, 0).unwrap();
         assert_eq!(excerpt.end_offset, (fixture.len() + unknown.len()) as u64);
         assert!(!excerpt.text.contains("ignored"));
-        assert!(matches!(
-            extract(agent, &path, fixture.len() as u64),
-            Err(Error::NoDialogue)
-        ));
+        let excerpt = extract(agent, &path, fixture.len() as u64).unwrap();
+        assert!(!excerpt.has_dialogue);
+        assert_eq!(excerpt.end_offset, (fixture.len() + unknown.len()) as u64);
 
         let tools: String = fixture
             .lines()
@@ -218,8 +217,12 @@ fn unknown_rows_advance_offset_but_tools_and_empty_messages_are_not_dialogue() {
             tools,
             message(agent, "user", " \t"),
         ] {
-            fs::write(&path, input).unwrap();
+            fs::write(&path, &input).unwrap();
             assert!(matches!(extract(agent, &path, 0), Err(Error::NoDialogue)));
+            assert!(matches!(
+                extract(agent, &path, input.len() as u64 + 1),
+                Err(Error::NoDialogue)
+            ));
         }
     }
 }
