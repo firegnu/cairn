@@ -719,6 +719,8 @@ fn generate(
         .args([
             "exec",
             "--ephemeral",
+            "--disable",
+            "memories",
             "--skip-git-repo-check",
             "-m",
             &model,
