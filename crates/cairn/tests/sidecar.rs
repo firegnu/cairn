@@ -125,10 +125,11 @@ set -eu
 [ "$1" = exec ]; shift
 [ -z "$(ls -A)" ]
 printf '%s' "$PWD" > "$SIDECAR_TEST_DIR/cwd"
-ephemeral=0; model=; effort=; output=
+ephemeral=0; disable_memories=0; model=; effort=; output=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --ephemeral) ephemeral=1; shift ;;
+        --disable) [ "$2" = memories ]; disable_memories=1; shift 2 ;;
         --skip-git-repo-check) shift ;;
         -m) model=$2; shift 2 ;;
         -c) effort=$2; shift 2 ;;
@@ -138,6 +139,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ "$ephemeral" = 1 ]
+[ "$disable_memories" = 1 ]
 input=$(cat)
 case "$input" in
     *'你在为一个软件项目维护"项目的账"'*)
