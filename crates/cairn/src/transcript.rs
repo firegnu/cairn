@@ -26,8 +26,10 @@
 //! is left unread, including its newline if any. On resume, a single LF/CRLF
 //! added after an already consumed unterminated record is consumed too;
 //! blank records at other boundaries still fail. Error line numbers start at
-//! one within the requested segment. At least one nonblank user/assistant
-//! text block in that segment is required; tool output alone is insufficient.
+//! one within the requested segment. Reading from zero requires at least one
+//! nonblank user/assistant text block; tool output alone is insufficient.
+//! Incremental segments without dialogue return their parsed boundary so the
+//! caller can advance progress without calling the model.
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -46,6 +48,8 @@ pub const EXCERPT_BYTES: usize = 60 * 1024;
 pub struct Excerpt {
     /// Extracted, shortened, and budgeted UTF-8 text.
     pub text: String,
+    /// At least one nonblank user/assistant text block was extracted.
+    pub has_dialogue: bool,
     /// Byte offset after the last successfully parsed line.
     pub end_offset: u64,
     /// The opened file was shorter than `from`, so reading restarted at zero.
@@ -130,11 +134,12 @@ pub fn extract(agent: Agent, path: &Path, from: u64) -> Result<Excerpt, Error> {
         }
         end_offset += read as u64;
     }
-    if !output.dialogue {
+    if !output.dialogue && from == 0 {
         return Err(Error::NoDialogue);
     }
     Ok(Excerpt {
         text: limit_excerpt(output.text),
+        has_dialogue: output.dialogue,
         end_offset,
         restarted,
     })

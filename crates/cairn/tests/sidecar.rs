@@ -328,6 +328,114 @@ stat -f '%Lp' .. > "$SIDECAR_TEST_DIR/outer-mode"
 }
 
 #[test]
+fn no_dialogue_increment_advances_both_stages_and_resumes_on_dialogue() {
+    for automatic in [false, true] {
+        let f = Fixture::new();
+        f.ok(&["adopt"], "");
+        f.session("one", "synthetic-first-message");
+        f.hook("one", "SessionEnd");
+        let database = f.path("state/cairn/cairn.db");
+        let args = if automatic {
+            vec![
+                "__wait",
+                "--database",
+                database.to_str().unwrap(),
+                "--root",
+                f.0.path().to_str().unwrap(),
+                "--source",
+                "claude:one",
+            ]
+        } else {
+            vec!["summarize"]
+        };
+        f.fake_ledger(
+            "## 停点\nprevious-summary",
+            "ADD state | first title | first body | synthetic evidence",
+            "",
+        );
+        f.ok(&args, "");
+        let records = f.records(true);
+        let ledger = f.ledger();
+        fs::remove_file(f.path("cwd")).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(f.path("one.jsonl"))
+            .unwrap()
+            .write_all(b"{\"type\":\"metadata\"}\n{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"synthetic-tool\",\"content\":\"synthetic result\"}]}}\n")
+            .unwrap();
+        // A successful no-op also clears a previous unsuccessful attempt.
+        f.store().connection().execute(
+            "UPDATE sessions SET failures=1,last_failure='previous failure',last_failure_at='2026-10-16T00:00:00Z',ledger_failures=1,ledger_last_failure='previous failure',ledger_last_failure_at='2026-10-16T00:00:00Z'",
+            [],
+        ).unwrap();
+        f.ok(&args, "");
+        assert!(
+            !f.path("cwd").exists(),
+            "no dialogue must not call the model"
+        );
+        let (bytes, ledger_bytes, cleared): (i64, i64, bool) = f.store().connection().query_row(
+            "SELECT summarized_bytes,ledger_bytes,failures=0 AND last_failure IS NULL AND last_failure_at IS NULL AND ledger_failures=0 AND ledger_last_failure IS NULL AND ledger_last_failure_at IS NULL AND waiter_id IS NULL FROM sessions WHERE source_id='claude:one'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        let length = fs::metadata(f.path("one.jsonl")).unwrap().len();
+        assert_eq!((bytes as u64, ledger_bytes as u64), (length, length));
+        assert!(cleared);
+        assert_eq!(f.records(true), records);
+        assert_eq!(f.ledger(), ledger);
+        let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+        assert!(status["sidecar"]["last_failure"].is_null());
+        assert!(status["ledger"]["last_failure"].is_null());
+        let injected = f.ok(
+            &["hook", "claude"],
+            &serde_json::json!({
+                "hook_event_name":"SessionStart", "session_id":"new", "cwd":f.path("project")
+            })
+            .to_string(),
+        );
+        assert!(!injected.contains("没写成"), "{injected}");
+        f.ok(&args, "");
+        assert!(!f.path("cwd").exists());
+
+        fs::OpenOptions::new()
+            .append(true)
+            .open(f.path("one.jsonl"))
+            .unwrap()
+            .write_all(dialogue("synthetic-new-dialogue").as_bytes())
+            .unwrap();
+        f.hook("one", "UserPromptSubmit");
+        f.hook("one", "SessionEnd");
+        let checks = r#"case "$input" in *'user: synthetic-new-dialogue'*) ;; *) exit 83 ;; esac
+case "$input" in *'user: synthetic-first-message'*|*'synthetic result'*) exit 84 ;; esac"#;
+        f.fake_ledger(
+            "## 停点\nnew-summary",
+            "EDIT #1 | new title | new body | new synthetic evidence",
+            checks,
+        );
+        f.fake_codex(checks, "## 停点\nnew-summary");
+        f.ok(&args, "");
+        assert_eq!(f.records(false)["records"][0]["summary"], "new-summary");
+        assert_eq!(f.records(true)["total"], 2);
+        assert_eq!(f.ledger_item("1")["item"]["title"], "new title");
+    }
+}
+
+#[test]
+fn no_dialogue_from_start_still_fails_both_stages() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic-placeholder");
+    fs::write(f.path("one.jsonl"), "{\"type\":\"metadata\"}\n").unwrap();
+    f.fake_codex("", "## 停点\nshould-not-be-used");
+    assert!(!f.run(&["summarize"], "").status.success());
+    assert!(!f.path("cwd").exists());
+    let failed: bool = f.store().connection().query_row(
+        "SELECT summarized_bytes=0 AND ledger_bytes=0 AND failures=1 AND ledger_failures=1 AND last_failure LIKE '%no user or assistant text%' AND ledger_last_failure LIKE '%no user or assistant text%' FROM sessions WHERE source_id='claude:one'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert!(failed);
+}
+
+#[test]
 fn summarize_skip_advances_progress_without_records_or_failures() {
     let f = Fixture::new();
     f.ok(&["adopt"], "");
