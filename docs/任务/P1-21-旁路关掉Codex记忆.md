@@ -50,3 +50,7 @@
 - 拿主意的地方：沿用现有参数数组，只插入设计文档 §8.8 已规定的两个参数，其余命令参数保持不变。
 - 没做的事：未调用真实 `codex`，未安装或修改真实配置，未读取真实会话、记忆或数据库，未改版本号、hook 定义，未合并或推送。
 - 主控决定：没有需要主控决定的事项。
+
+## 主控审查
+
+2026-10-16，cairn/main。通过，已合并。diff 只在 `generate` 的参数里插了 `--disable memories`，假 `codex` 改成缺这个参数就失败，别的没动。在 `.target/p1-21-sidecar-memories` 重跑 `cargo test --all-targets --no-fail-fast` 201 项全过、clippy 通过。真 `codex exec --help`（经 IP Guardian 包装脚本）有 `--disable <FEATURE>`，主控派活前已看过。
