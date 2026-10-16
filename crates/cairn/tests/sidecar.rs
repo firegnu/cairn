@@ -1002,6 +1002,236 @@ case "$input" in *'excluded-content'*) exit 82 ;; esac
 }
 
 #[test]
+fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_everything() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic mixed batch");
+    let entry = "ADD state | state title | body | evidence\n";
+    let lesson = "ADD lesson | lesson title | body | evidence\n";
+    let invalid = [
+        entry.repeat(11) + lesson,
+        format!("{lesson}ADD open | {} | body | evidence", "界".repeat(201)),
+        format!("{lesson}EDIT #999 | missing | body | evidence"),
+        format!("{entry}{lesson}ADD lesson | title | bad\\q | evidence"),
+        format!("{entry}{lesson}ADD lesson | title | body | evidence | extra"),
+        format!("{entry}{lesson}\n{lesson}"),
+        format!("{entry}{lesson}not a mutation"),
+    ];
+    for (n, output) in invalid.iter().enumerate() {
+        f.fake_ledger("NOTHING_TO_CONTINUE", output, "");
+        assert!(
+            !f.run(&["summarize"], "").status.success(),
+            "accepted {output}"
+        );
+        assert_eq!(f.ledger(), serde_json::json!({"version":0,"items":[]}));
+        let (bytes, failures, reason): (i64, i64, String) = f
+            .store()
+            .connection()
+            .query_row(
+                "SELECT ledger_bytes,ledger_failures,ledger_last_failure FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(bytes, 0);
+        assert_eq!(failures, n as i64 + 1);
+        assert_eq!(reason, "输出不合格");
+    }
+    f.fake_ledger(
+        "NOTHING_TO_CONTINUE",
+        &(entry.repeat(10) + &lesson.repeat(5)),
+        "",
+    );
+    f.ok(&["summarize"], "");
+    let ledger = f.ledger();
+    let items = ledger["items"].as_array().unwrap();
+    assert_eq!(ledger["version"], 1);
+    assert_eq!(items.iter().filter(|i| i["kind"] == "state").count(), 10);
+    assert_eq!(items.iter().filter(|i| i["kind"] == "lesson").count(), 5);
+    // EDIT and CLOSE of lessons count in the five, separately from ten edits
+    // of ordinary entries. All fifteen share a single committed version.
+    fs::OpenOptions::new()
+        .append(true)
+        .open(f.path("one.jsonl"))
+        .unwrap()
+        .write_all(dialogue("synthetic edits and closes").as_bytes())
+        .unwrap();
+    let output: String = (1..=10)
+        .map(|n| format!("EDIT #{n} | revised state | body | evidence\n"))
+        .collect();
+    let lessons: String = (11..=15)
+        .map(|n| {
+            if n % 2 == 0 {
+                format!("CLOSE #{n} | obsolete | evidence\n")
+            } else {
+                format!("EDIT #{n} | revised lesson | body | evidence\n")
+            }
+        })
+        .collect();
+    f.fake_ledger("NOTHING_TO_CONTINUE", &(output + &lessons), "");
+    f.ok(&["summarize"], "");
+    assert_eq!(f.ledger()["version"], 2);
+    assert_eq!(f.ledger_item("11")["item"]["title"], "revised lesson");
+    assert_eq!(f.ledger_item("12")["item"]["status"], "closed");
+}
+
+#[test]
+fn lesson_only_invalid_group_advances_without_a_ledger_version() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic lesson overflow");
+    f.fake_ledger(
+        "NOTHING_TO_CONTINUE",
+        &"ADD lesson | title | body | evidence\n".repeat(6),
+        "",
+    );
+    f.ok(&["summarize"], "");
+    assert_eq!(f.ledger(), serde_json::json!({"version":0,"items":[]}));
+    assert!(f.ok(&["status"], "").contains("经验没写成：超过 5 笔"));
+    assert!(f.ok(&["summarize"], "").contains("没有需要"));
+}
+
+#[test]
+fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
+    let cases = [
+        (
+            "ADD lesson | extra | body | evidence\n".repeat(4)
+                + "EDIT #1 | revised | revised body | evidence\nCLOSE #2 | merged | evidence",
+            "超过 5 笔",
+        ),
+        (
+            format!("ADD lesson | {} | body | evidence", "界".repeat(201)),
+            "标题不合格",
+        ),
+        (
+            format!("EDIT #1 | title | {} | evidence", "界".repeat(342)),
+            "正文超过 1 KiB",
+        ),
+        (
+            format!("CLOSE #2 | reason | {}", "界".repeat(501)),
+            "依据不合格",
+        ),
+        ("CLOSE #2 | | evidence".into(), "理由为空"),
+        (
+            "EDIT #1 | revised | body | evidence\nCLOSE #1 | reason | evidence".into(),
+            "同一条既修改又了结",
+        ),
+        (
+            "EDIT #3 | revised | body | evidence".into(),
+            "条目不是有效经验",
+        ),
+        ("CLOSE #4 | reason | evidence".into(), "条目不是有效经验"),
+    ];
+    for (invalid, reason) in cases {
+        let f = Fixture::new();
+        f.ok(&["adopt"], "");
+        for title in ["first", "second", "closed", "deleted"] {
+            f.ok(&["ledger", "add", "lesson", title], "original body");
+        }
+        f.ok(&["ledger", "close", "3", "obsolete"], "");
+        f.ok(&["ledger", "delete", "4", "--yes"], "");
+        let before = f.ledger();
+        f.session("one", "synthetic lesson failure");
+        f.fake_ledger(
+            "NOTHING_TO_CONTINUE",
+            &format!("ADD state | survives | body | evidence\n{invalid}"),
+            "",
+        );
+        let output = f.ok(&["summarize"], "");
+        assert!(
+            output.contains(&format!("经验没写成：{reason}")),
+            "{output}"
+        );
+        let after = f.ledger();
+        assert_eq!(after["version"], 7);
+        assert_eq!(after["items"][0]["title"], "survives");
+        assert_eq!(
+            &after["items"].as_array().unwrap()[1..],
+            before["items"].as_array().unwrap()
+        );
+        let (bytes, failures): (i64, i64) = f
+            .store()
+            .connection()
+            .query_row(
+                "SELECT ledger_bytes,ledger_failures FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            bytes as u64,
+            fs::metadata(f.path("one.jsonl")).unwrap().len()
+        );
+        assert_eq!(failures, 0);
+        let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+        assert_eq!(
+            status["ledger"]["last_failure"]["reason"],
+            format!("经验没写成：{reason}")
+        );
+        assert_eq!(status["ledger"]["last_failure"]["source_id"], "claude:one");
+        assert!(status["ledger"]["last_failure"]["at"].is_string());
+        assert!(f
+            .ok(&["status"], "")
+            .contains(&format!("经验没写成：{reason}")));
+        assert!(f.ok(&["summarize"], "").contains("没有需要"));
+        // The rejected lessons are not retried with the next excerpt, and a
+        // successful batch clears the observation without consuming retries.
+        fs::OpenOptions::new()
+            .append(true)
+            .open(f.path("one.jsonl"))
+            .unwrap()
+            .write_all(dialogue("next excerpt").as_bytes())
+            .unwrap();
+        f.fake_ledger("NOTHING_TO_CONTINUE", "NO_CHANGES", "");
+        f.ok(&["summarize"], "");
+        let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+        assert!(status["ledger"]["last_failure"].is_null());
+        assert_eq!(f.ledger(), after);
+    }
+}
+
+#[test]
+fn lesson_sidecar_records_evidence_history_and_receives_active_lessons_and_instructions() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.ok(&["ledger", "add", "lesson", "原来教训"], "旧正文");
+    f.ok(&["ledger", "add", "lesson", "重复教训"], "重复正文");
+    f.ok(&["ledger", "add", "lesson", "失效教训"], "已失效");
+    f.ok(&["ledger", "close", "3", "条件不再成立"], "");
+    f.session("one", "synthetic-lesson-evidence");
+    f.fake_ledger(
+        "## 停点\nsummary-with-lessons",
+        "ADD lesson | 工具教训 | 遇到合成条件时先检查版本 | 实测之后才知道\nEDIT #1 | 合并的教训 | 合并正文 | 两条说的是一回事\nCLOSE #2 | 合并到 #1 | 两条说的是一回事",
+        r#"
+case "$input" in *'账里只有四类条目'*'lesson（经验）：做过才知道'*'ADD <state|open|convention|lesson>'*'一次最多 10 笔账的变动，另外最多 5 笔经验的变动'*'经验一次最多记 3 条最值得留的'*'拿不准的、只发生一次以后不会再遇到的、只是这个会话里的权宜之计，不记'*'记成 convention，不记成 lesson'*'改其中一条、了结另一条'*'经验被证明不对、或者条件已经不成立，了结它，理由写清'*) ;; *) exit 83 ;; esac
+case "$input" in *'当前的账'*'#1 lesson | 原来教训 | 旧正文'*'#2 lesson | 重复教训 | 重复正文'*'会话摘录'*'synthetic-lesson-evidence'*) ;; *) exit 84 ;; esac
+case "$input" in *'#3 lesson'*) exit 85 ;; esac
+"#,
+    );
+    f.ok(&["summarize"], "");
+    assert_eq!(f.ledger()["version"], 5);
+    let added = f.ledger_item("4");
+    assert_eq!(added["item"]["kind"], "lesson");
+    assert_eq!(added["item"]["created_by"], "claude:one");
+    assert_eq!(added["changes"][0]["evidence"], "实测之后才知道");
+    let edited = f.ledger_item("1");
+    assert_eq!(edited["item"]["body"], "合并正文");
+    assert_eq!(edited["changes"][0]["before_title"], "原来教训");
+    assert_eq!(edited["changes"][0]["before_body"], "旧正文");
+    let closed = f.ledger_item("2");
+    assert_eq!(closed["item"]["status"], "closed");
+    assert_eq!(closed["changes"][0]["close_reason"], "合并到 #1");
+    for item in [added, edited, closed] {
+        assert_eq!(item["changes"][0]["by"], "claude:one");
+        assert_eq!(item["changes"][0]["ledger_version"], 5);
+    }
+    assert_eq!(
+        f.records(false)["records"][0]["summary"],
+        "summary-with-lessons"
+    );
+}
+
+#[test]
 fn ledger_add_edit_close_commit_one_version_with_session_evidence_and_progress() {
     let f = Fixture::new();
     f.ok(&["adopt"], "");

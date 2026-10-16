@@ -121,6 +121,63 @@ fn allow(_agent: &str, _case: &str) -> &'static str {
 }
 
 #[test]
+fn lesson_hooks_inject_three_sections_and_supplement_typed_changes_with_shared_budget() {
+    for agent in ["claude", "codex"] {
+        let f = Fixture::new();
+        f.run(&["adopt"], "");
+        f.run(&["ledger", "add", "state", "开局现状"], "账正文");
+        f.run(&["ledger", "add", "lesson", "开局经验"], "经验正文");
+        f.run(
+            &["save", "--source", "codex:previous"],
+            "## 停点\n合成会话摘要",
+        );
+        let started: Value = serde_json::from_str(&f.hook(agent, "session_start")).unwrap();
+        let text = started["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.find("### 项目的账").unwrap() < text.find("### 经验").unwrap());
+        assert!(text.find("### 经验").unwrap() < text.find("### 本工作线").unwrap());
+        for body in ["账正文", "经验正文", "合成会话摘要"] {
+            assert!(text.contains(body));
+        }
+        assert!(f.hook(agent, "user_prompt_submit").is_empty());
+        f.run(&["ledger", "add", "lesson", "新教训"], "新经验正文");
+        f.run(&["ledger", "edit", "2", "--title", "合并教训"], "合并正文");
+        f.run(&["ledger", "close", "3", "合并到 #2"], "");
+        f.run(&["ledger", "add", "open", "待定事项"], "账的变动");
+        let supplemented: Value =
+            serde_json::from_str(&f.hook(agent, "user_prompt_submit")).unwrap();
+        let text = supplemented["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.starts_with("[cairn] 项目的账有变动："));
+        for change in [
+            "新增 #3 新教训（经验） · 新经验正文",
+            "修改 #2 合并教训（经验） · 合并正文",
+            "了结 #3 新教训（经验） · 合并到 #2",
+            "新增 #4 待定事项（悬而未决） · 账的变动",
+        ] {
+            assert!(text.contains(change), "missing {change}: {text}");
+        }
+        assert!(text.chars().count() <= 3000);
+        assert!(f.hook(agent, "user_prompt_submit").is_empty());
+        for kind in ["state", "lesson", "lesson", "open", "convention"] {
+            f.run(&["ledger", "add", kind, "长条目"], &"字".repeat(800));
+        }
+        let supplemented: Value =
+            serde_json::from_str(&f.hook(agent, "user_prompt_submit")).unwrap();
+        let text = supplemented["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("5 笔变动；查看"));
+        assert!(text.contains(" ledger log`"));
+        assert!(!text.contains(&"字".repeat(800)));
+        assert!(text.chars().count() <= 3000);
+        assert!(f.hook(agent, "user_prompt_submit").is_empty());
+    }
+}
+
+#[test]
 fn ledger_hooks_inject_start_then_each_change_once_with_historical_close_reason() {
     for agent in ["claude", "codex"] {
         let f = Fixture::new();

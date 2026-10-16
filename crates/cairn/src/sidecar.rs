@@ -493,7 +493,13 @@ fn process_session(
     }
     if needs_ledger(session, automatic) {
         match write_ledger(store, session, root, lease, timing) {
-            Ok(()) => output.push(format!("{}：记账完成", session.source)),
+            Ok(warning) => output.push(format!(
+                "{}：记账完成{}",
+                session.source,
+                warning
+                    .map(|reason| format!("；{reason}（这批经验已跳过）"))
+                    .unwrap_or_default()
+            )),
             Err(error) => {
                 let reason = error.to_string();
                 store.connection().execute(
@@ -544,7 +550,7 @@ fn write_ledger(
     root: &Path,
     lease: &Lease,
     timing: Timing,
-) -> Result<()> {
+) -> Result<Option<String>> {
     use crate::ledger::sidecar::{apply, parse, prompt, OUTPUT_LIMIT};
     if !lease.heartbeat(store.connection(), Utc::now())? {
         return Err("会话占位已失效".into());
@@ -560,7 +566,7 @@ fn write_ledger(
         // Version and items must come from one read snapshot, with no transaction
         // held while the model runs. Retry uses the same uncommitted excerpt.
         let tx = store.transaction(rusqlite::TransactionBehavior::Deferred)?;
-        let ledger = crate::ledger::read(&tx, &session.project_key, false)?;
+        let ledger = crate::ledger::read(&tx, &session.project_key, true)?;
         tx.commit()?;
         let output = generate(
             store.connection(),
@@ -570,7 +576,7 @@ fn write_ledger(
             timing,
             OUTPUT_LIMIT,
         )?;
-        let mutations = parse(&output, &ledger)?;
+        let batch = parse(&output, &ledger)?;
         let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
         if !lease.heartbeat(&tx, Utc::now())? {
             return Err("会话占位已失效".into());
@@ -580,14 +586,17 @@ fn write_ledger(
             session.project_id,
             &session.project_key,
             ledger.version,
-            &mutations,
+            &batch.mutations,
             &session.source,
         )? {
             continue;
         }
-        tx.execute("UPDATE sessions SET ledger_bytes=?2,ledger_failures=0,ledger_last_failure=NULL,ledger_last_failure_at=NULL WHERE source_id=?1", params![session.source,excerpt.end_offset as i64])?;
+        // A rejected lesson group advances progress and never consumes the
+        // retry limit. Keep its reason in the existing observation columns.
+        let failure_at = batch.lesson_failure.as_ref().map(|_| crate::save::now());
+        tx.execute("UPDATE sessions SET ledger_bytes=?2,ledger_failures=0,ledger_last_failure=?3,ledger_last_failure_at=?4 WHERE source_id=?1", params![session.source,excerpt.end_offset as i64,batch.lesson_failure,failure_at])?;
         tx.commit()?;
-        return Ok(());
+        return Ok(batch.lesson_failure);
     }
     Err("账在记的时候被改了".into())
 }
