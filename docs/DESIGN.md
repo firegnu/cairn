@@ -641,12 +641,12 @@ save 进程里：
 - 只用 Codex，调用户已经登录的 `codex exec`（D6）。不用 Claude，不配 API key，不做成可换的命令。cairn 自己不写联网的代码，像调 `git` 那样调一条带时限的命令。P1-04 用过的形式：
 
   ```sh
-  CAIRN_DISABLE=1 codex exec --ephemeral -m gpt-5.6-luna -c 'model_reasoning_effort="medium"' -o <输出文件> -
+  CAIRN_DISABLE=1 codex exec --ephemeral --disable memories -m gpt-5.6-luna -c 'model_reasoning_effort="medium"' -o <输出文件> -
   ```
 
   具体参数以实现时的 CLI 为准。`codex` 从 PATH 里找，找不到就是一种"没写成"。
 - 模型和推理强度是两项设置：`sidecar.model`（默认 `gpt-5.6-luna`）、`sidecar.effort`（默认 `medium`），存在 `meta` 表里，用 `cairn config` 看和改。写在命令里，不跟随用户 Codex 的全局默认。模型名会随版本过时，所以不写死在程序里。
-- 旁路调起来的也是一个会话，会触发所在目录的 hook（P1-04），所以三件事一起做：带 `CAIRN_DISABLE=1`，cairn 的 hook 认它；在用户私有临时目录下新建的一个空目录里运行，那里没有项目 hook，用完删掉；带 `--ephemeral`，不留会话。
+- 旁路调起来的也是一个会话，会触发所在目录的 hook（P1-04），所以三件事一起做（2026-10-16 加第四件）：带 `CAIRN_DISABLE=1`，cairn 的 hook 认它；在用户私有临时目录下新建的一个空目录里运行，那里没有项目 hook，用完删掉；带 `--ephemeral`，不留会话。还带 `--disable memories`（2026-10-16），关掉这次调用的 Codex 记忆：`~/.codex/memories` 是跨项目的，会把别的项目的内容带进摘要和账；只管这一次调用，不改用户配置。
 - 给它的要求是固定文字（§9.4），连同抽出来的文本从 stdin 传入；要求里写明不调用工具。
 - Claude Code 的会话也由 Codex 写摘要，这些会话的内容摘录会交给 Codex（D12、§12）。
 
