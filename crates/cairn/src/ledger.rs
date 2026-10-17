@@ -15,6 +15,7 @@ use std::{
 };
 
 pub(crate) mod context;
+pub(crate) mod runs;
 pub(crate) mod sidecar;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -38,6 +39,12 @@ impl Kind {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Runs {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
     Show {
         id: String,
         #[arg(long)]
@@ -332,6 +339,36 @@ fn read_output(
     command: Option<Command>,
     cwd: &Path,
 ) -> Result<String> {
+    if let Some(Command::Runs { limit, json }) = command {
+        let runs = c
+            .map(|c| runs::read(c, key, limit))
+            .transpose()?
+            .unwrap_or_default();
+        return if json {
+            Ok(serde_json::to_string(&runs)?)
+        } else {
+            Ok(runs
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{} · {} · {}\n摘录：截前 {} 字节；中间省略 {} 字节；工具截短 {} 段\n",
+                        r.finished_at,
+                        r.source_id,
+                        r.result_text(),
+                        r.extracted_bytes
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        r.omitted_bytes
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "未知".into()),
+                        r.tools_cut
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "未知".into())
+                    )
+                })
+                .collect())
+        };
+    }
     let ledger = c
         .map(|c| read(c, key, true))
         .transpose()?
@@ -419,7 +456,12 @@ pub(crate) fn run(
     let reader = Store::open_read_only(database, BusyTimeout::UserCommand)?;
     if matches!(
         command,
-        None | Some(Command::Show { .. } | Command::Log { .. } | Command::Export { .. })
+        None | Some(
+            Command::Show { .. }
+                | Command::Log { .. }
+                | Command::Export { .. }
+                | Command::Runs { .. }
+        )
     ) {
         if let Some(mut reader) = reader {
             let tx = reader.transaction(TransactionBehavior::Deferred)?;

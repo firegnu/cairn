@@ -91,14 +91,28 @@ pub(crate) struct Batch {
     pub lesson_failure: Option<String>,
 }
 
+impl Mutation {
+    pub fn is_lesson(&self, ledger: &Ledger) -> bool {
+        match self {
+            Self::Add { kind, .. } => kind == "lesson",
+            Self::Edit { no, .. } | Self::Close { no, .. } => ledger
+                .items
+                .iter()
+                .any(|i| i.no == *no && i.kind == "lesson"),
+        }
+    }
+}
+
 /// Parse the whole output before validating either group. The snapshot includes
 /// inactive items so an edit/close targeting an old lesson stays in that group.
 pub(crate) fn parse(output: &str, ledger: &Ledger) -> Result<Batch> {
-    let invalid = || "输出不合格";
     if output.len() > OUTPUT_LIMIT {
-        return Err(invalid().into());
+        return Err("输出不合格：超过 128 KiB".into());
     }
     let output = output.trim();
+    if output.is_empty() {
+        return Err("输出不合格：没有内容".into());
+    }
     if output == "NO_CHANGES" {
         return Ok(Batch {
             mutations: vec![],
@@ -106,89 +120,102 @@ pub(crate) fn parse(output: &str, ledger: &Ledger) -> Result<Batch> {
         });
     }
     let mut mutations = Vec::new();
-    for line in output.lines() {
-        let fields = fields(line).ok_or_else(invalid)?;
-        let (action, argument) = fields[0].split_once(' ').ok_or_else(invalid)?;
-        let mutation = match (action, fields.len()) {
-            ("ADD", 4) if matches!(argument, "state" | "open" | "convention" | "lesson") => {
-                Mutation::Add {
-                    kind: argument.into(),
+    for (index, line) in output.lines().enumerate() {
+        let number = index + 1;
+        let invalid = |rule| format!("输出不合格：第 {number} 行：{rule}");
+        if line.trim().is_empty() {
+            return Err(invalid("空行").into());
+        }
+        let fields = fields(line).ok_or_else(|| invalid("转义不支持"))?;
+        let (action, argument) = fields[0]
+            .split_once(' ')
+            .ok_or_else(|| invalid("操作不支持"))?;
+        let count = match action {
+            "ADD" | "EDIT" => 4,
+            "CLOSE" => 3,
+            _ => return Err(invalid("操作不支持").into()),
+        };
+        if fields.len() != count {
+            return Err(invalid("字段数不对").into());
+        }
+        let mutation = if action == "ADD" {
+            if !matches!(argument, "state" | "open" | "convention" | "lesson") {
+                return Err(invalid("类不合法").into());
+            }
+            Mutation::Add {
+                kind: argument.into(),
+                title: fields[1].clone(),
+                body: fields[2].clone(),
+                evidence: fields[3].clone(),
+            }
+        } else {
+            let digits = argument
+                .strip_prefix('#')
+                .ok_or_else(|| invalid("编号不合格"))?;
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(invalid("编号不合格").into());
+            }
+            let no = digits.parse::<i64>().map_err(|_| invalid("编号不合格"))?;
+            if !ledger.items.iter().any(|i| i.no == no) {
+                return Err(invalid("编号不存在").into());
+            }
+            if action == "EDIT" {
+                Mutation::Edit {
+                    no,
                     title: fields[1].clone(),
                     body: fields[2].clone(),
                     evidence: fields[3].clone(),
                 }
-            }
-            ("EDIT", 4) | ("CLOSE", 3) => {
-                let digits = argument.strip_prefix('#').ok_or_else(invalid)?;
-                if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                    return Err(invalid().into());
-                }
-                let no = digits.parse::<i64>().map_err(|_| invalid())?;
-                if action == "EDIT" {
-                    Mutation::Edit {
-                        no,
-                        title: fields[1].clone(),
-                        body: fields[2].clone(),
-                        evidence: fields[3].clone(),
-                    }
-                } else {
-                    Mutation::Close {
-                        no,
-                        reason: fields[1].clone(),
-                        evidence: fields[2].clone(),
-                    }
+            } else {
+                Mutation::Close {
+                    no,
+                    reason: fields[1].clone(),
+                    evidence: fields[2].clone(),
                 }
             }
-            _ => return Err(invalid().into()),
         };
-        let lesson = match &mutation {
-            Mutation::Add { kind, .. } => kind == "lesson",
-            Mutation::Edit { no, .. } | Mutation::Close { no, .. } => {
-                ledger
-                    .items
-                    .iter()
-                    .find(|i| i.no == *no)
-                    .ok_or_else(invalid)?
-                    .kind
-                    == "lesson"
-            }
-        };
-        mutations.push((lesson, mutation));
+        mutations.push((number, mutation.is_lesson(ledger), mutation));
     }
-    if mutations.is_empty() {
-        return Err(invalid().into());
-    }
-    let (lessons, entries): (Vec<_>, Vec<_>) = mutations.iter().partition(|(lesson, _)| *lesson);
-    let entries: Vec<_> = entries.into_iter().map(|(_, m)| m).collect();
-    validate(&entries, ledger, 10).map_err(|_| invalid())?;
-    let lessons: Vec<_> = lessons.into_iter().map(|(_, m)| m).collect();
+    let entries: Vec<_> = mutations
+        .iter()
+        .filter(|(_, lesson, _)| !lesson)
+        .map(|(line, _, m)| (*line, m))
+        .collect();
+    validate(&entries, ledger, 10).map_err(|reason| format!("输出不合格：{reason}"))?;
+    let lessons: Vec<_> = mutations
+        .iter()
+        .filter(|(_, lesson, _)| *lesson)
+        .map(|(line, _, m)| (*line, m))
+        .collect();
     let lesson_failure = validate(&lessons, ledger, 5)
         .err()
         .map(|reason| format!("经验没写成：{reason}"));
     Ok(Batch {
         mutations: mutations
             .into_iter()
-            .filter(|(lesson, _)| !lesson || lesson_failure.is_none())
-            .map(|(_, m)| m)
+            .filter(|(_, lesson, _)| !lesson || lesson_failure.is_none())
+            .map(|(_, _, m)| m)
             .collect(),
         lesson_failure,
     })
 }
 
 fn validate(
-    mutations: &[&Mutation],
+    mutations: &[(usize, &Mutation)],
     ledger: &Ledger,
     limit: usize,
-) -> std::result::Result<(), &'static str> {
+) -> std::result::Result<(), String> {
     if mutations.len() > limit {
         return Err(if limit == 5 {
             "超过 5 笔"
         } else {
-            "超过 10 笔"
-        });
+            "账的变动超过 10 笔"
+        }
+        .into());
     }
     let mut targets = std::collections::HashMap::new();
-    for mutation in mutations {
+    for (line, mutation) in mutations {
+        let invalid = |rule| format!("第 {line} 行：{rule}");
         let evidence = match mutation {
             Mutation::Add {
                 title,
@@ -206,10 +233,10 @@ fn validate(
                     || title.chars().count() > 200
                     || title.chars().any(char::is_control)
                 {
-                    return Err("标题不合格");
+                    return Err(invalid("标题不合格"));
                 }
                 if body.len() > 1024 {
-                    return Err("正文超过 1 KiB");
+                    return Err(invalid("正文超过 1 KiB"));
                 }
                 evidence
             }
@@ -217,33 +244,33 @@ fn validate(
                 reason, evidence, ..
             } => {
                 if reason.is_empty() {
-                    return Err("理由为空");
+                    return Err(invalid("理由为空"));
                 }
                 evidence
             }
         };
         if evidence.is_empty() || evidence.chars().count() > 500 {
-            return Err("依据不合格");
+            return Err(invalid("依据不合格"));
         }
         if let Mutation::Edit { no, .. } | Mutation::Close { no, .. } = mutation {
             let item = ledger
                 .items
                 .iter()
                 .find(|i| i.no == *no)
-                .ok_or("条目不存在")?;
+                .ok_or_else(|| invalid("编号不存在"))?;
             if item.status != "active" || item.deleted_at.is_some() {
-                return Err(if item.kind == "lesson" {
+                return Err(invalid(if item.kind == "lesson" {
                     "条目不是有效经验"
                 } else {
                     "条目不是有效账目"
-                });
+                }));
             }
             let edit = matches!(mutation, Mutation::Edit { .. });
             if targets
                 .insert(no, edit)
                 .is_some_and(|previous| previous != edit)
             {
-                return Err("同一条既修改又了结");
+                return Err(invalid("同一条既改又了结"));
             }
         }
     }

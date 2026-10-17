@@ -492,7 +492,15 @@ fn process_session(
         }
     }
     if needs_ledger(session, automatic) {
-        match write_ledger(store, session, root, lease, timing) {
+        let mut run = crate::ledger::runs::Run {
+            project_id: session.project_id,
+            source_id: session.source.clone(),
+            manual: !automatic,
+            started_at: crate::save::now(),
+            from_bytes: session.ledger_bytes,
+            ..Default::default()
+        };
+        match write_ledger(store, session, root, lease, timing, &mut run) {
             Ok(warning) => output.push(format!(
                 "{}：记账完成{}",
                 session.source,
@@ -502,9 +510,21 @@ fn process_session(
             )),
             Err(error) => {
                 let reason = error.to_string();
-                store.connection().execute(
+                let lost = error.is::<LedgerLeaseLost>();
+                run.outcome = if lost { "lease_lost" } else { "failed" }.into();
+                run.finished_at = crate::save::now();
+                run.reason = Some(reason.clone());
+                run.entries = 0;
+                run.lessons = 0;
+                run.ledger_version = None;
+                let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
+                if !lost {
+                    tx.execute(
                     "UPDATE sessions SET ledger_failures=ledger_failures+1,ledger_last_failure_at=?2,ledger_last_failure=?3 WHERE source_id=?1 AND waiter_id=?4",
                     params![session.source,crate::save::now(),reason,lease.id])?;
+                }
+                run.insert(&tx)?;
+                tx.commit()?;
                 output.push(format!("{}：记账没写成：{reason}", session.source));
                 failed = true;
             }
@@ -550,10 +570,11 @@ fn write_ledger(
     root: &Path,
     lease: &Lease,
     timing: Timing,
+    run: &mut crate::ledger::runs::Run,
 ) -> Result<Option<String>> {
     use crate::ledger::sidecar::{apply, parse, prompt, OUTPUT_LIMIT};
     if !lease.heartbeat(store.connection(), Utc::now())? {
-        return Err("会话占位已失效".into());
+        return Err(LedgerLeaseLost("读取会话记录前").into());
     }
     let agent = match session.agent.as_str() {
         "claude" => Agent::Claude,
@@ -562,6 +583,13 @@ fn write_ledger(
     };
     let excerpt = crate::transcript::extract(agent, &session.path, session.ledger_bytes as u64)
         .map_err(|error| format!("会话记录读不了或解析不了：{error}"))?;
+    if excerpt.restarted {
+        run.from_bytes = 0;
+    }
+    run.to_bytes = Some(excerpt.end_offset as i64);
+    run.extracted_bytes = Some(excerpt.extracted_bytes);
+    run.omitted_bytes = Some(excerpt.omitted_bytes);
+    run.tools_cut = Some(excerpt.tools_cut);
     for _ in 0..2 {
         // Version and items must come from one read snapshot, with no transaction
         // held while the model runs. Retry uses the same uncommitted excerpt.
@@ -576,14 +604,21 @@ fn write_ledger(
                 lease,
                 timing,
                 OUTPUT_LIMIT,
-            )?
+            )
+            .map_err(|error| -> Box<dyn std::error::Error> {
+                if error.to_string() == "会话占位已失效" {
+                    LedgerLeaseLost("等待记账模型时").into()
+                } else {
+                    error
+                }
+            })?
         } else {
             "NO_CHANGES".to_owned()
         };
         let batch = parse(&output, &ledger)?;
         let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
         if !lease.heartbeat(&tx, Utc::now())? {
-            return Err("会话占位已失效".into());
+            return Err(LedgerLeaseLost("提交记账结果前").into());
         }
         if !apply(
             &tx,
@@ -599,11 +634,33 @@ fn write_ledger(
         // retry limit. Keep its reason in the existing observation columns.
         let failure_at = batch.lesson_failure.as_ref().map(|_| crate::save::now());
         tx.execute("UPDATE sessions SET ledger_bytes=?2,ledger_failures=0,ledger_last_failure=?3,ledger_last_failure_at=?4 WHERE source_id=?1", params![session.source,excerpt.end_offset as i64,batch.lesson_failure,failure_at])?;
+        run.lessons = batch
+            .mutations
+            .iter()
+            .filter(|m| m.is_lesson(&ledger))
+            .count();
+        run.entries = batch.mutations.len() - run.lessons;
+        run.outcome = if !batch.mutations.is_empty() {
+            "changed"
+        } else if excerpt.has_dialogue {
+            "no_changes"
+        } else {
+            "no_dialogue"
+        }
+        .into();
+        run.ledger_version = (!batch.mutations.is_empty()).then_some(ledger.version + 1);
+        run.reason.clone_from(&batch.lesson_failure);
+        run.finished_at = crate::save::now();
+        run.insert(&tx)?;
         tx.commit()?;
         return Ok(batch.lesson_failure);
     }
     Err("账在记的时候被改了".into())
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("会话占位已失效：{0}")]
+struct LedgerLeaseLost(&'static str);
 
 #[derive(Debug, thiserror::Error)]
 #[error("部分会话摘要或记账没写成")]
@@ -805,9 +862,15 @@ fn generate(
         return Err(error);
     }
     let mut body = String::new();
-    output
-        .reopen()?
-        .take((output_limit + 1) as u64)
+    let file = output.reopen()?;
+    // Diagnose oversized ledger output before the bounded read can split a
+    // UTF-8 character. Summary output keeps its existing validation behavior.
+    if output_limit == crate::ledger::sidecar::OUTPUT_LIMIT
+        && file.metadata()?.len() > output_limit as u64
+    {
+        return Err("输出不合格：超过 128 KiB".into());
+    }
+    file.take((output_limit + 1) as u64)
         .read_to_string(&mut body)
         .map_err(|_| "输出不合格：无法读取 UTF-8 摘要")?;
     Ok(body)

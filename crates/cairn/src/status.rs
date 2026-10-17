@@ -94,10 +94,12 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
     let mut seen = Vec::new();
     let mut summaries = Vec::new();
     let mut ledger_failures = Vec::new();
+    let mut ledger_recent = None;
     let project_status = if let Some(store) = store {
         seen = last_seen(store.connection(), project_key)?;
         summaries = crate::sidecar::observations(store.connection(), &scope)?;
         ledger_failures = crate::ledger::failures(store.connection(), project_key)?;
+        ledger_recent = crate::ledger::runs::recent_sessions(store.connection(), project_key)?;
         let adopted = store
             .connection()
             .query_row(
@@ -146,13 +148,16 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
         .filter(|s| s.failure.is_some())
         .max_by_key(|s| &s.failure_at)
         .map(|s| json!({"source_id":s.source,"at":s.failure_at,"reason":s.failure}));
-    let report = json!({"agents": agents,
+    let mut report = json!({"agents": agents,
         "ledger":{"failed_sessions":ledger_failures.len(),"last_failure":ledger_failures.first()},
         "sidecar":{"codex_available":codex_available,"unsummarized_sessions":unsummarized,"last_failure":last_failure},
         "stable_path": {"path":paths.stable, "is_symlink":is_symlink, "valid":valid, "target":fs::read_link(&paths.stable).ok()},
         "project":{"key":scope.project_key, "database_path":database,"status":project_status},
         "spool":{"path":spool.path,"pending_json":spool.pending_json,"residual_tmp":spool.residual_tmp},
         "codex_trust_reminder":trust});
+    if let Some(recent) = &ledger_recent {
+        report["ledger"]["recent_sessions"] = serde_json::to_value(recent)?;
+    }
     if as_json {
         return Ok(serde_json::to_string_pretty(&report)?);
     }
@@ -242,6 +247,19 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
             failure.at.as_deref().unwrap_or("时间未记录"),
             failure.reason.as_deref().unwrap_or("原因未记录")
         ));
+    }
+    if let Some(recent) = ledger_recent.filter(|r| !r.is_empty()) {
+        text.push_str("最近记账的会话：\n");
+        for session in recent {
+            text.push_str(&format!(
+                "{}：{} · {}；连续 {} 次没有变动或没有对话；最新摘要：{}\n",
+                session.latest.source_id,
+                session.latest.finished_at,
+                session.latest.result_text(),
+                session.unchanged_streak,
+                session.summary_at.as_deref().unwrap_or("尚无摘要")
+            ));
+        }
     }
     Ok(text)
 }

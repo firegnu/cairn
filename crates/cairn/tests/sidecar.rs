@@ -1145,7 +1145,16 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
             .unwrap();
         assert_eq!(bytes, 0);
         assert_eq!(failures, n as i64 + 1);
-        assert_eq!(reason, "输出不合格");
+        let expected = [
+            "账的变动超过 10 笔",
+            "第 2 行：标题不合格",
+            "第 2 行：编号不存在",
+            "第 3 行：转义不支持",
+            "第 3 行：字段数不对",
+            "第 3 行：空行",
+            "第 3 行：操作不支持",
+        ][n];
+        assert_eq!(reason, format!("输出不合格：{expected}"));
     }
     f.fake_ledger(
         "NOTHING_TO_CONTINUE",
@@ -1198,6 +1207,12 @@ fn lesson_only_invalid_group_advances_without_a_ledger_version() {
     f.ok(&["summarize"], "");
     assert_eq!(f.ledger(), serde_json::json!({"version":0,"items":[]}));
     assert!(f.ok(&["status"], "").contains("经验没写成：超过 5 笔"));
+    let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+    assert_eq!(runs[0]["outcome"], "no_changes");
+    assert_eq!(runs[0]["entries"], 0);
+    assert_eq!(runs[0]["lessons"], 0);
+    assert_eq!(runs[0]["reason"], "经验没写成：超过 5 笔");
+    assert!(runs[0]["ledger_version"].is_null());
     assert!(f.ok(&["summarize"], "").contains("没有需要"));
 }
 
@@ -1211,26 +1226,29 @@ fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
         ),
         (
             format!("ADD lesson | {} | body | evidence", "界".repeat(201)),
-            "标题不合格",
+            "第 2 行：标题不合格",
         ),
         (
             format!("EDIT #1 | title | {} | evidence", "界".repeat(342)),
-            "正文超过 1 KiB",
+            "第 2 行：正文超过 1 KiB",
         ),
         (
             format!("CLOSE #2 | reason | {}", "界".repeat(501)),
-            "依据不合格",
+            "第 2 行：依据不合格",
         ),
-        ("CLOSE #2 | | evidence".into(), "理由为空"),
+        ("CLOSE #2 | | evidence".into(), "第 2 行：理由为空"),
         (
             "EDIT #1 | revised | body | evidence\nCLOSE #1 | reason | evidence".into(),
-            "同一条既修改又了结",
+            "第 3 行：同一条既改又了结",
         ),
         (
             "EDIT #3 | revised | body | evidence".into(),
-            "条目不是有效经验",
+            "第 2 行：条目不是有效经验",
         ),
-        ("CLOSE #4 | reason | evidence".into(), "条目不是有效经验"),
+        (
+            "CLOSE #4 | reason | evidence".into(),
+            "第 2 行：条目不是有效经验",
+        ),
     ];
     for (invalid, reason) in cases {
         let f = Fixture::new();
@@ -1252,6 +1270,11 @@ fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
             output.contains(&format!("经验没写成：{reason}")),
             "{output}"
         );
+        let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+        assert_eq!(runs[0]["outcome"], "changed");
+        assert_eq!(runs[0]["entries"], 1);
+        assert_eq!(runs[0]["lessons"], 0);
+        assert_eq!(runs[0]["reason"], format!("经验没写成：{reason}"));
         let after = f.ledger();
         assert_eq!(after["version"], 7);
         assert_eq!(after["items"][0]["title"], "survives");
@@ -1482,7 +1505,30 @@ fn ledger_invalid_batches_are_discarded_whole_and_failures_stop_only_automatic_a
             .unwrap();
         assert_eq!(bytes, 0);
         assert_eq!(failures, index as i64 + 1);
-        assert_eq!(reason, "输出不合格");
+        let expected = [
+            "第 2 行：类不合法",
+            "第 2 行：编号不存在",
+            "第 3 行：同一条既改又了结",
+            "第 2 行：标题不合格",
+            "第 2 行：正文超过 1 KiB",
+            "第 2 行：依据不合格",
+            "账的变动超过 10 笔",
+            "第 2 行：转义不支持",
+            "第 2 行：转义不支持",
+            "第 2 行：标题不合格",
+            "第 2 行：依据不合格",
+            "第 2 行：字段数不对",
+            "第 2 行：编号不合格",
+            "第 2 行：操作不支持",
+            "第 2 行：空行",
+            "第 2 行：操作不支持",
+        ][index];
+        assert_eq!(reason, format!("输出不合格：{expected}"));
+        let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+        assert_eq!(runs[0]["outcome"], "failed");
+        assert_eq!(runs[0]["reason"], reason);
+        assert_eq!(runs[0]["entries"], 0);
+        assert!(!runs.to_string().contains("private-synthetic-ledger-text"));
     }
     // Reset only fixture state to exercise exactly two automatic failures.
     f.store()
@@ -1675,6 +1721,19 @@ exit 0
         f.release("a-2-release");
         assert!(a.finish().status.success());
         assert_eq!(fs::read_to_string(f.path("a-count")).unwrap(), "2");
+        let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+        let attempts: Vec<_> = runs
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["source_id"] == "claude:a")
+            .collect();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0]["manual"], false);
+        assert_eq!(
+            attempts[0]["outcome"],
+            if conflict_again { "failed" } else { "changed" }
+        );
         let ledger = f.ledger();
         assert_eq!(ledger["version"], 2);
         assert_eq!(ledger["items"].as_array().unwrap().len(), 2);
@@ -1788,4 +1847,239 @@ fn new_turn_resets_ledger_failure_limit_and_waiter_records_again() {
     );
     assert!(f.waiter("one").finish().status.success());
     assert_eq!(f.ledger_item("1")["item"]["title"], "next turn");
+}
+
+#[test]
+fn ledger_runs_append_outcomes_without_content_and_read_newest_first() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic private dialogue");
+    f.fake_ledger("## 停点\nsynthetic summary", "NO_CHANGES", "");
+    f.ok(&["summarize"], "");
+    let runs =
+        || -> Value { serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap() };
+    let first = runs();
+    assert_eq!(first.as_array().unwrap().len(), 1);
+    assert_eq!(first[0]["source_id"], "claude:one");
+    assert_eq!(first[0]["outcome"], "no_changes");
+    assert_eq!(first[0]["manual"], true);
+    assert_eq!(first[0]["entries"], 0);
+    assert_eq!(first[0]["lessons"], 0);
+    assert!(first[0]["ledger_version"].is_null());
+    assert_eq!(first[0]["from_bytes"], 0);
+    assert_eq!(
+        first[0]["to_bytes"],
+        fs::metadata(f.path("one.jsonl")).unwrap().len()
+    );
+    assert_eq!(first[0]["extracted_bytes"], 33);
+    assert_eq!(first[0]["omitted_bytes"], 0);
+    assert_eq!(first[0]["tools_cut"], 0);
+    for key in ["started_at", "finished_at"] {
+        chrono::DateTime::parse_from_rfc3339(first[0][key].as_str().unwrap()).unwrap();
+    }
+    f.ok(&["summarize"], "");
+    assert_eq!(runs(), first); // ineligible sessions do not append
+    fs::OpenOptions::new()
+        .append(true)
+        .open(f.path("one.jsonl"))
+        .unwrap()
+        .write_all(dialogue("another synthetic private message").as_bytes())
+        .unwrap();
+    f.fake_ledger("## 停点\nnext synthetic summary", "ADD state | private title | private body | private evidence\nADD lesson | private lesson | private body | private evidence", "");
+    f.ok(&["summarize"], "");
+    let second = runs();
+    assert_eq!(second.as_array().unwrap().len(), 2);
+    assert_eq!(second[1], first[0]);
+    assert_eq!(second[0]["outcome"], "changed");
+    assert_eq!(second[0]["entries"], 1);
+    assert_eq!(second[0]["lessons"], 1);
+    assert_eq!(second[0]["ledger_version"], 1);
+    assert_eq!(second[0]["from_bytes"], first[0]["to_bytes"]);
+    assert!(!second.to_string().contains("private"));
+    let limited: Value =
+        serde_json::from_str(&f.ok(&["ledger", "runs", "--limit", "1", "--json"], "")).unwrap();
+    assert_eq!(limited, serde_json::json!([second[0]]));
+    assert!(f.ok(&["ledger", "runs"], "").contains("账 1 笔、经验 1 笔"));
+}
+
+#[test]
+fn status_reports_unchanged_streak_alongside_fresh_summaries() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "first synthetic dialogue");
+    f.fake_ledger("## 停点\nsynthetic summary", "NO_CHANGES", "");
+    for _ in 0..3 {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(f.path("one.jsonl"))
+            .unwrap()
+            .write_all(dialogue("next synthetic dialogue").as_bytes())
+            .unwrap();
+        f.ok(&["summarize"], "");
+    }
+    let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+    let recent = &status["ledger"]["recent_sessions"];
+    assert_eq!(recent.as_array().unwrap().len(), 1);
+    assert_eq!(recent[0]["latest"]["source_id"], "claude:one");
+    assert_eq!(recent[0]["latest"]["outcome"], "no_changes");
+    assert_eq!(recent[0]["unchanged_streak"], 3);
+    let summaries = f.records(false);
+    assert_eq!(
+        recent[0]["summary_at"],
+        summaries["records"][0]["created_at"]
+    );
+    assert!(recent[0]["summary_at"].is_string());
+    let text = f.ok(&["status"], "");
+    assert!(text.contains("连续 3 次没有变动或没有对话"), "{text}");
+    assert!(text.contains(recent[0]["summary_at"].as_str().unwrap()));
+    // Metadata-only tails join the unchanged streak without calling the model.
+    fs::OpenOptions::new()
+        .append(true)
+        .open(f.path("one.jsonl"))
+        .unwrap()
+        .write_all(b"{\"type\":\"metadata\"}\n")
+        .unwrap();
+    f.fake_ledger("invalid if called", "invalid if called", "exit 91");
+    f.ok(&["summarize"], "");
+    let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+    assert_eq!(
+        status["ledger"]["recent_sessions"][0]["latest"]["outcome"],
+        "no_dialogue"
+    );
+    assert_eq!(
+        status["ledger"]["recent_sessions"][0]["unchanged_streak"],
+        4
+    );
+    assert_eq!(
+        status["ledger"]["recent_sessions"][0]["summary_at"],
+        recent[0]["summary_at"]
+    );
+}
+
+#[test]
+fn ledger_runs_record_lease_loss_even_when_the_new_owner_blocks_session_updates() {
+    for during_summary in [true, false] {
+        let f = Fixture::new();
+        f.ok(&["adopt"], "");
+        f.session("one", "synthetic lease loss");
+        let gate = r#"
+touch "$SIDECAR_TEST_DIR/ready"
+i=0
+while [ ! -e "$SIDECAR_TEST_DIR/release" ]; do
+    i=$((i + 1)); [ "$i" -lt 1000 ]; sleep 0.01
+done
+"#;
+        f.fake_ledger(
+            "## 停点\nsynthetic summary",
+            "ADD state | never committed | body | evidence",
+            if during_summary { "" } else { gate },
+        );
+        if during_summary {
+            f.fake_codex(gate, "## 停点\nsynthetic summary");
+        }
+        let mut child = RunningSidecar(
+            f.command(&["summarize"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        f.ready("ready");
+        f.store().connection().execute("UPDATE sessions SET waiter_id='new-owner',ledger_failures=1,ledger_last_failure='new-owner reason'", []).unwrap();
+        f.release("release");
+        assert!(!child.finish().status.success());
+        let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+        assert_eq!(runs.as_array().unwrap().len(), 1);
+        assert_eq!(runs[0]["outcome"], "lease_lost");
+        assert_eq!(
+            runs[0]["reason"],
+            if during_summary {
+                "会话占位已失效：读取会话记录前"
+            } else {
+                "会话占位已失效：提交记账结果前"
+            }
+        );
+        assert_eq!(runs[0]["entries"], 0);
+        assert!(runs[0]["ledger_version"].is_null());
+        assert_eq!(runs[0]["to_bytes"].is_null(), during_summary);
+        let state: (String, i64, String) = f
+            .store()
+            .connection()
+            .query_row(
+                "SELECT waiter_id,ledger_failures,ledger_last_failure FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("new-owner".into(), 1, "new-owner reason".into()));
+        assert_eq!(f.ledger()["version"], 0);
+        let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+        assert_eq!(status["ledger"]["recent_sessions"][0]["latest"], runs[0]);
+        assert_eq!(
+            status["ledger"]["recent_sessions"][0]["unchanged_streak"],
+            0
+        );
+        assert!(f.ok(&["status"], "").contains("占位丢了"));
+    }
+}
+
+#[test]
+fn ledger_runs_keep_exact_truncation_counts_and_whole_output_diagnostics() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "x");
+    let tools = serde_json::json!({"type":"assistant","message":{"content":[
+        {"type":"tool_use","name":"x","id":"t","input":"x".repeat(501)},
+        {"type":"tool_result","tool_use_id":"t","content":"x".repeat(501)}
+    ]}});
+    fs::write(
+        f.path("one.jsonl"),
+        format!("{}{}\n", dialogue(&"x".repeat(70_000)), tools),
+    )
+    .unwrap();
+    for (output, reason) in [
+        (" ".to_owned(), "输出不合格：没有内容"),
+        ("x".repeat(128 * 1024 + 1), "输出不合格：超过 128 KiB"),
+        ("🦀".repeat(32_769), "输出不合格：超过 128 KiB"),
+    ] {
+        f.fake_ledger("## 停点\nsynthetic summary", &output, "");
+        assert!(!f.run(&["summarize"], "").status.success());
+        let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+        assert_eq!(runs[0]["outcome"], "failed");
+        assert_eq!(runs[0]["reason"], reason);
+        // 70,007 dialogue bytes + 520 bytes per shortened tool line.
+        assert_eq!(runs[0]["extracted_bytes"], 71_047);
+        // The existing cap reserves 31 bytes for its omission marker.
+        assert_eq!(runs[0]["omitted_bytes"], 9_638);
+        assert_eq!(runs[0]["tools_cut"], 2);
+    }
+}
+
+#[test]
+fn ledger_runs_and_status_read_older_or_absent_databases_without_writing() {
+    let f = Fixture::new();
+    assert_eq!(f.ok(&["ledger", "runs", "--json"], "").trim(), "[]");
+    assert!(!f.path("state").exists());
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic old database");
+    f.fake_ledger("## 停点\nsynthetic summary", "NO_CHANGES", "");
+    f.ok(&["summarize"], "");
+    f.store().connection().execute_batch("DROP TABLE ledger_runs; UPDATE meta SET value='4' WHERE key='schema_version'; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    let db = f.path("state/cairn/cairn.db");
+    let before = fs::read(&db).unwrap();
+    assert_eq!(f.ok(&["ledger", "runs", "--json"], "").trim(), "[]");
+    assert_eq!(f.ok(&["ledger", "runs"], "").trim(), "");
+    let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+    assert!(status["ledger"].get("recent_sessions").is_none());
+    assert!(!f.ok(&["status"], "").contains("最近记账的会话"));
+    assert_eq!(fs::read(&db).unwrap(), before);
+    let c = rusqlite::Connection::open(&db).unwrap();
+    c.execute_batch("UPDATE meta SET value='6' WHERE key='schema_version'")
+        .unwrap();
+    for args in [vec!["ledger", "runs", "--json"], vec!["status", "--json"]] {
+        let output = f.run(&args, "");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("newer than supported version 5"));
+    }
 }

@@ -137,3 +137,25 @@ ALTER TABLE sessions ADD COLUMN ledger_last_failure TEXT;
 ALTER TABLE sessions ADD COLUMN ledger_injected_version INTEGER;
 UPDATE sessions SET ledger_bytes=summarized_bytes, ledger_injected_version=0;
 "#;
+
+/// Append-only outcomes of ledger attempts; no transcript or model content.
+pub(super) const V5: &str = r#"
+CREATE TABLE ledger_runs (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    source_id TEXT NOT NULL,
+    manual INTEGER NOT NULL,
+    started_at TEXT NOT NULL, finished_at TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    entries INTEGER NOT NULL DEFAULT 0,
+    lessons INTEGER NOT NULL DEFAULT 0,
+    ledger_version INTEGER,
+    reason TEXT,
+    from_bytes INTEGER NOT NULL,
+    to_bytes INTEGER,
+    extracted_bytes INTEGER,
+    omitted_bytes INTEGER,
+    tools_cut INTEGER
+);
+CREATE INDEX ledger_runs_project ON ledger_runs(project_id, id);
+"#;

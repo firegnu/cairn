@@ -789,7 +789,7 @@ fn version_1_database_reports_nothing_seen_until_a_hook_upgrades_it() {
     let connection = rusqlite::Connection::open(f.db()).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
+            "DROP TABLE ledger_runs; DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value = '1' WHERE key = 'schema_version';",
         )
         .unwrap();
     let version = |connection: &rusqlite::Connection| -> String {
@@ -812,7 +812,7 @@ fn version_1_database_reports_nothing_seen_until_a_hook_upgrades_it() {
     assert_eq!(version(&connection), "1");
 
     assert!(!f.hook("claude", "session_start").is_empty());
-    assert_eq!(version(&connection), "4");
+    assert_eq!(version(&connection), "5");
     assert!(last_seen(&f, "claude", "SessionStart").is_string());
 }
 

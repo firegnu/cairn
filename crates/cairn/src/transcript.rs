@@ -54,6 +54,10 @@ pub struct Excerpt {
     pub end_offset: u64,
     /// The opened file was shorter than `from`, so reading restarted at zero.
     pub restarted: bool,
+    /// UTF-8 bytes after tool shortening, before the 60 KiB cap.
+    pub extracted_bytes: usize,
+    pub omitted_bytes: usize,
+    pub tools_cut: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -137,11 +141,16 @@ pub fn extract(agent: Agent, path: &Path, from: u64) -> Result<Excerpt, Error> {
     if !output.dialogue && from == 0 {
         return Err(Error::NoDialogue);
     }
+    let extracted_bytes = output.text.len();
+    let (text, omitted_bytes) = limit_excerpt(output.text);
     Ok(Excerpt {
-        text: limit_excerpt(output.text),
+        text,
         has_dialogue: output.dialogue,
         end_offset,
         restarted,
+        extracted_bytes,
+        omitted_bytes,
+        tools_cut: output.tools_cut,
     })
 }
 
@@ -149,6 +158,7 @@ pub fn extract(agent: Agent, path: &Path, from: u64) -> Result<Excerpt, Error> {
 struct Output {
     text: String,
     dialogue: bool,
+    tools_cut: usize,
 }
 
 impl Output {
@@ -167,29 +177,29 @@ impl Output {
     }
 
     fn call(&mut self, name: &str, id: &str, input: &Value) {
-        self.line(
-            &format!("tool_call {name} [{id}]"),
-            &shorten_tool(&value_text(input)),
-        );
+        let text = self.shorten_tool(&value_text(input));
+        self.line(&format!("tool_call {name} [{id}]"), &text);
     }
 
     fn result(&mut self, id: &str, text: &str) {
-        self.line(&format!("tool_result [{id}]"), &shorten_tool(text));
+        let text = self.shorten_tool(text);
+        self.line(&format!("tool_result [{id}]"), &text);
+    }
+
+    fn shorten_tool(&mut self, text: &str) -> String {
+        if text.chars().count() <= TOOL_TEXT_CHARS {
+            return text.to_owned();
+        }
+        self.tools_cut += 1;
+        let mut shortened: String = text.chars().take(TOOL_TEXT_CHARS - 1).collect();
+        shortened.push('…');
+        shortened
     }
 }
 
-fn shorten_tool(text: &str) -> String {
-    if text.chars().count() <= TOOL_TEXT_CHARS {
-        return text.to_owned();
-    }
-    let mut shortened: String = text.chars().take(TOOL_TEXT_CHARS - 1).collect();
-    shortened.push('…');
-    shortened
-}
-
-fn limit_excerpt(text: String) -> String {
+fn limit_excerpt(text: String) -> (String, usize) {
     if text.len() <= EXCERPT_BYTES {
-        return text;
+        return (text, 0);
     }
     // Reserve enough marker space even if the omitted count has fewer digits.
     let marker_bytes = format!("\n[... omitted {} bytes ...]\n", text.len()).len();
@@ -202,11 +212,14 @@ fn limit_excerpt(text: String) -> String {
     while !text.is_char_boundary(tail) {
         tail += 1;
     }
-    format!(
-        "{}\n[... omitted {} bytes ...]\n{}",
-        &text[..head],
+    (
+        format!(
+            "{}\n[... omitted {} bytes ...]\n{}",
+            &text[..head],
+            tail - head,
+            &text[tail..]
+        ),
         tail - head,
-        &text[tail..]
     )
 }
 
