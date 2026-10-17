@@ -1345,7 +1345,7 @@ fn json_contract_list_reads_v1_without_ingesting_or_upgrading() {
     store
         .connection()
         .execute_batch(
-            "DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version';
+            "DROP TABLE ledger_runs; DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version';
          PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
@@ -1611,7 +1611,7 @@ fn json_contract_show_collects_upgrades_and_preserves_body_and_correction() {
     let store = f.store();
     store
         .connection()
-        .execute_batch("DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version'")
+        .execute_batch("DROP TABLE ledger_runs; DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by; DROP TABLE hook_seen; UPDATE meta SET value='1' WHERE key='schema_version'")
         .unwrap();
     let shown = f.show(&id);
     assert_eq!(shown["written_by"], "save");
@@ -1627,7 +1627,7 @@ fn json_contract_show_collects_upgrades_and_preserves_body_and_correction() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, "4");
+    assert_eq!(version, "5");
     for key in [
         "project_id",
         "project_key",
@@ -1673,7 +1673,7 @@ fn json_contract_version_2_is_read_only_and_defaults_writer_to_save() {
     store
         .connection()
         .execute_batch(
-            "DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by;
+            "DROP TABLE ledger_runs; DROP TABLE item_changes; DROP TABLE items; DROP TABLE ledgers; DROP TABLE sessions; ALTER TABLE records DROP COLUMN written_by;
         UPDATE meta SET value='2' WHERE key='schema_version'; PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();

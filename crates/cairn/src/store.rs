@@ -11,7 +11,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, Transactio
 
 mod schema;
 
-pub const SCHEMA_VERSION: u64 = 4;
+pub const SCHEMA_VERSION: u64 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -166,6 +166,7 @@ impl Store {
                 (2, schema::V2),
                 (3, schema::V3),
                 (4, schema::V4),
+                (5, schema::V5),
             ] {
                 if found < version {
                     tx.execute_batch(step)?;

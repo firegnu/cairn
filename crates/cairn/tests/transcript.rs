@@ -255,6 +255,8 @@ fn tool_arguments_and_results_are_limited_to_500_unicode_characters() {
             let input = format!("{}{call}\n{result}\n", message(agent, "user", &body));
             fs::write(&path, input).unwrap();
             let excerpt = extract(agent, &path, 0).unwrap();
+            assert_eq!(excerpt.tools_cut, if count == 501 { 2 } else { 0 });
+            assert_eq!(excerpt.omitted_bytes, 0);
             let lines: Vec<_> = excerpt.text.lines().collect();
             assert_eq!(lines[0], format!("user: {body}"));
             let expected = if count <= 500 {
@@ -283,14 +285,17 @@ fn excerpt_caps_utf8_bytes_and_keeps_one_quarter_head_three_quarters_tail() {
             let original = format!("user: {body}\n");
             fs::write(&path, &input).unwrap();
             let excerpt = extract(agent, &path, 0).unwrap();
+            assert_eq!(excerpt.extracted_bytes, original.len());
             assert_eq!(excerpt.end_offset, input.len() as u64);
             assert!(excerpt.text.len() <= 60 * 1024);
             if original.len() <= 60 * 1024 {
+                assert_eq!(excerpt.omitted_bytes, 0);
                 assert_eq!(excerpt.text, original);
             } else {
                 let (head, rest) = excerpt.text.split_once("\n[... omitted ").unwrap();
                 let (count, tail) = rest.split_once(" bytes ...]\n").unwrap();
                 let omitted: usize = count.parse().unwrap();
+                assert_eq!(excerpt.omitted_bytes, omitted);
                 assert!(original.starts_with(head));
                 assert!(original.ends_with(tail));
                 assert_eq!(head.len() + omitted + tail.len(), original.len());
