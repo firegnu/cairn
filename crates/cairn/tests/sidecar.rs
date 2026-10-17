@@ -7,6 +7,25 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
+fn add(kind: &str, title: &str, body: &str, evidence: &str) -> Value {
+    serde_json::json!({"op":"add", "kind":kind, "no":null, "title":title,
+        "body":body, "reason":null, "evidence":evidence})
+}
+
+fn edit(no: i64, title: &str, body: &str, evidence: &str) -> Value {
+    serde_json::json!({"op":"edit", "kind":null, "no":no, "title":title,
+        "body":body, "reason":null, "evidence":evidence})
+}
+
+fn close(no: i64, reason: &str, evidence: &str) -> Value {
+    serde_json::json!({"op":"close", "kind":null, "no":no, "title":null,
+        "body":null, "reason":reason, "evidence":evidence})
+}
+
+fn changes(changes: &[Value]) -> String {
+    serde_json::json!({"changes": changes}).to_string()
+}
+
 struct Fixture(tempfile::TempDir);
 
 impl Fixture {
@@ -125,9 +144,10 @@ set -eu
 [ "$1" = exec ]; shift
 [ -z "$(ls -A)" ]
 printf '%s' "$PWD" > "$SIDECAR_TEST_DIR/cwd"
-ephemeral=0; disable_memories=0; model=; effort=; output=
+ephemeral=0; disable_memories=0; model=; effort=; output=; schema=
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --output-schema) schema=$2; [ -f "$schema" ]; shift 2 ;;
         --ephemeral) ephemeral=1; shift ;;
         --disable) [ "$2" = memories ]; disable_memories=1; shift 2 ;;
         --skip-git-repo-check) shift ;;
@@ -143,14 +163,18 @@ done
 input=$(cat)
 case "$input" in
     *'你在为一个软件项目维护"项目的账"'*)
+        [ -n "$schema" ]
+        printf '%s' "$schema" > "$SIDECAR_TEST_DIR/schema-path"
+        cp "$schema" "$SIDECAR_TEST_DIR/schema.json"
         if [ -f "$SIDECAR_TEST_DIR/ledger-checks" ]; then . "$SIDECAR_TEST_DIR/ledger-checks"; fi
         if [ -f "$SIDECAR_TEST_DIR/ledger-output" ]; then
             cat "$SIDECAR_TEST_DIR/ledger-output" > "$output"
         else
-            printf 'NO_CHANGES\n' > "$output"
+            printf '{{"changes":[]}}\n' > "$output"
         fi
         exit 0 ;;
 esac
+[ -z "$schema" ]
 case "$input" in *'不要调用工具'*'不超过 6 KiB'*'会话摘录'*) ;; *) exit 82 ;; esac
 {checks}
 cat > "$output" <<'SUMMARY'
@@ -171,9 +195,9 @@ SUMMARY
         serde_json::from_str(&self.ok(&args, "")).unwrap()
     }
 
-    fn fake_ledger(&self, summary: &str, output: &str, checks: &str) {
+    fn fake_ledger(&self, summary: &str, output: impl AsRef<str>, checks: &str) {
         self.fake_codex("", summary);
-        fs::write(self.path("ledger-output"), output).unwrap();
+        fs::write(self.path("ledger-output"), output.as_ref()).unwrap();
         fs::write(self.path("ledger-checks"), checks).unwrap();
     }
 
@@ -350,7 +374,12 @@ fn no_dialogue_increment_advances_both_stages_and_resumes_on_dialogue() {
         };
         f.fake_ledger(
             "## 停点\nprevious-summary",
-            "ADD state | first title | first body | synthetic evidence",
+            changes(&[add(
+                "state",
+                "first title",
+                "first body",
+                "synthetic evidence",
+            )]),
             "",
         );
         f.ok(&args, "");
@@ -408,7 +437,7 @@ fn no_dialogue_increment_advances_both_stages_and_resumes_on_dialogue() {
 case "$input" in *'user: synthetic-first-message'*|*'synthetic result'*) exit 84 ;; esac"#;
         f.fake_ledger(
             "## 停点\nnew-summary",
-            "EDIT #1 | new title | new body | new synthetic evidence",
+            changes(&[edit(1, "new title", "new body", "new synthetic evidence")]),
             checks,
         );
         f.fake_codex(checks, "## 停点\nnew-summary");
@@ -1116,16 +1145,29 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
     let f = Fixture::new();
     f.ok(&["adopt"], "");
     f.session("one", "synthetic mixed batch");
-    let entry = "ADD state | state title | body | evidence\n";
-    let lesson = "ADD lesson | lesson title | body | evidence\n";
+    let entry = add("state", "state title", "body", "evidence");
+    let lesson = add("lesson", "lesson title", "body", "evidence");
+    let mut overflow = vec![entry.clone(); 11];
+    overflow.push(lesson.clone());
     let invalid = [
-        entry.repeat(11) + lesson,
-        format!("{lesson}ADD open | {} | body | evidence", "界".repeat(201)),
-        format!("{lesson}EDIT #999 | missing | body | evidence"),
-        format!("{entry}{lesson}ADD lesson | title | bad\\q | evidence"),
-        format!("{entry}{lesson}ADD lesson | title | body | evidence | extra"),
-        format!("{entry}{lesson}\n{lesson}"),
-        format!("{entry}{lesson}not a mutation"),
+        changes(&overflow),
+        changes(&[
+            lesson.clone(),
+            add("open", &"界".repeat(201), "body", "evidence"),
+        ]),
+        changes(&[lesson.clone(), edit(999, "missing", "body", "evidence")]),
+        r#"{"changes":[{"body":"bad\q"}]}"#.into(),
+        changes(&[
+            entry.clone(),
+            lesson.clone(),
+            serde_json::json!({"op":"add"}),
+        ]),
+        changes(&[entry.clone(), lesson.clone(), Value::Null]),
+        changes(&[
+            entry.clone(),
+            lesson.clone(),
+            serde_json::json!({"op":"unsupported", "kind":null, "no":null, "title":null, "body":null, "reason":null, "evidence":null}),
+        ]),
     ];
     for (n, output) in invalid.iter().enumerate() {
         f.fake_ledger("NOTHING_TO_CONTINUE", output, "");
@@ -1147,18 +1189,18 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
         assert_eq!(failures, n as i64 + 1);
         let expected = [
             "账的变动超过 10 笔",
-            "第 2 行：标题不合格",
-            "第 2 行：编号不存在",
-            "第 3 行：转义不支持",
-            "第 3 行：字段数不对",
-            "第 3 行：空行",
-            "第 3 行：操作不支持",
+            "第 2 笔：标题不合格",
+            "第 2 笔：编号不存在",
+            "不是合格的 JSON",
+            "不是合格的 JSON",
+            "不是合格的 JSON",
+            "第 3 笔：操作不支持",
         ][n];
         assert_eq!(reason, format!("输出不合格：{expected}"));
     }
     f.fake_ledger(
         "NOTHING_TO_CONTINUE",
-        &(entry.repeat(10) + &lesson.repeat(5)),
+        changes(&[vec![entry; 10], vec![lesson; 5]].concat()),
         "",
     );
     f.ok(&["summarize"], "");
@@ -1175,19 +1217,17 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
         .unwrap()
         .write_all(dialogue("synthetic edits and closes").as_bytes())
         .unwrap();
-    let output: String = (1..=10)
-        .map(|n| format!("EDIT #{n} | revised state | body | evidence\n"))
+    let mut output: Vec<_> = (1..=10)
+        .map(|n| edit(n, "revised state", "body", "evidence"))
         .collect();
-    let lessons: String = (11..=15)
-        .map(|n| {
-            if n % 2 == 0 {
-                format!("CLOSE #{n} | obsolete | evidence\n")
-            } else {
-                format!("EDIT #{n} | revised lesson | body | evidence\n")
-            }
-        })
-        .collect();
-    f.fake_ledger("NOTHING_TO_CONTINUE", &(output + &lessons), "");
+    output.extend((11..=15).map(|n| {
+        if n % 2 == 0 {
+            close(n, "obsolete", "evidence")
+        } else {
+            edit(n, "revised lesson", "body", "evidence")
+        }
+    }));
+    f.fake_ledger("NOTHING_TO_CONTINUE", changes(&output), "");
     f.ok(&["summarize"], "");
     assert_eq!(f.ledger()["version"], 2);
     assert_eq!(f.ledger_item("11")["item"]["title"], "revised lesson");
@@ -1201,7 +1241,7 @@ fn lesson_only_invalid_group_advances_without_a_ledger_version() {
     f.session("one", "synthetic lesson overflow");
     f.fake_ledger(
         "NOTHING_TO_CONTINUE",
-        &"ADD lesson | title | body | evidence\n".repeat(6),
+        changes(&vec![add("lesson", "title", "body", "evidence"); 6]),
         "",
     );
     f.ok(&["summarize"], "");
@@ -1220,34 +1260,43 @@ fn lesson_only_invalid_group_advances_without_a_ledger_version() {
 fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
     let cases = [
         (
-            "ADD lesson | extra | body | evidence\n".repeat(4)
-                + "EDIT #1 | revised | revised body | evidence\nCLOSE #2 | merged | evidence",
+            [
+                vec![add("lesson", "extra", "body", "evidence"); 4],
+                vec![
+                    edit(1, "revised", "revised body", "evidence"),
+                    close(2, "merged", "evidence"),
+                ],
+            ]
+            .concat(),
             "超过 5 笔",
         ),
         (
-            format!("ADD lesson | {} | body | evidence", "界".repeat(201)),
-            "第 2 行：标题不合格",
+            vec![add("lesson", &"界".repeat(201), "body", "evidence")],
+            "第 2 笔：标题不合格",
         ),
         (
-            format!("EDIT #1 | title | {} | evidence", "界".repeat(342)),
-            "第 2 行：正文超过 1 KiB",
+            vec![edit(1, "title", &"界".repeat(342), "evidence")],
+            "第 2 笔：正文超过 1 KiB",
         ),
         (
-            format!("CLOSE #2 | reason | {}", "界".repeat(501)),
-            "第 2 行：依据不合格",
+            vec![close(2, "reason", &"界".repeat(501))],
+            "第 2 笔：依据不合格",
         ),
-        ("CLOSE #2 | | evidence".into(), "第 2 行：理由为空"),
+        (vec![close(2, "", "evidence")], "第 2 笔：理由为空"),
         (
-            "EDIT #1 | revised | body | evidence\nCLOSE #1 | reason | evidence".into(),
-            "第 3 行：同一条既改又了结",
+            vec![
+                edit(1, "revised", "body", "evidence"),
+                close(1, "reason", "evidence"),
+            ],
+            "第 3 笔：同一条既改又了结",
         ),
         (
-            "EDIT #3 | revised | body | evidence".into(),
-            "第 2 行：条目不是有效经验",
+            vec![edit(3, "revised", "body", "evidence")],
+            "第 2 笔：条目不是有效经验",
         ),
         (
-            "CLOSE #4 | reason | evidence".into(),
-            "第 2 行：条目不是有效经验",
+            vec![close(4, "reason", "evidence")],
+            "第 2 笔：条目不是有效经验",
         ),
     ];
     for (invalid, reason) in cases {
@@ -1262,7 +1311,7 @@ fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
         f.session("one", "synthetic lesson failure");
         f.fake_ledger(
             "NOTHING_TO_CONTINUE",
-            &format!("ADD state | survives | body | evidence\n{invalid}"),
+            changes(&[vec![add("state", "survives", "body", "evidence")], invalid].concat()),
             "",
         );
         let output = f.ok(&["summarize"], "");
@@ -1315,7 +1364,7 @@ fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
             .unwrap()
             .write_all(dialogue("next excerpt").as_bytes())
             .unwrap();
-        f.fake_ledger("NOTHING_TO_CONTINUE", "NO_CHANGES", "");
+        f.fake_ledger("NOTHING_TO_CONTINUE", changes(&[]), "");
         f.ok(&["summarize"], "");
         let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
         assert!(status["ledger"]["last_failure"].is_null());
@@ -1334,9 +1383,9 @@ fn lesson_sidecar_records_evidence_history_and_receives_active_lessons_and_instr
     f.session("one", "synthetic-lesson-evidence");
     f.fake_ledger(
         "## 停点\nsummary-with-lessons",
-        "ADD lesson | 工具教训 | 遇到合成条件时先检查版本 | 实测之后才知道\nEDIT #1 | 合并的教训 | 合并正文 | 两条说的是一回事\nCLOSE #2 | 合并到 #1 | 两条说的是一回事",
+        changes(&[add("lesson", "工具教训", "遇到合成条件时先检查版本", "实测之后才知道"), edit(1, "合并的教训", "合并正文", "两条说的是一回事"), close(2, "合并到 #1", "两条说的是一回事")]),
         r#"
-case "$input" in *'账里只有四类条目'*'lesson（经验）：做过才知道'*'ADD <state|open|convention|lesson>'*'一次最多 10 笔账的变动，另外最多 5 笔经验的变动'*'经验一次最多记 3 条最值得留的'*'拿不准的、只发生一次以后不会再遇到的、只是这个会话里的权宜之计，不记'*'记成 convention，不记成 lesson'*'改其中一条、了结另一条'*'经验被证明不对、或者条件已经不成立，了结它，理由写清'*) ;; *) exit 83 ;; esac
+case "$input" in *'账里只有四类条目'*'lesson（经验）：做过才知道'*'kind（state、open、convention、lesson 之一）'*'一次最多 10 笔账的变动，另外最多 5 笔经验的变动'*'经验一次最多记 3 条最值得留的'*'拿不准的、只发生一次以后不会再遇到的、只是这个会话里的权宜之计，不记'*'记成 convention，不记成 lesson'*'改其中一条、了结另一条'*'经验被证明不对、或者条件已经不成立，了结它，理由写清'*) ;; *) exit 83 ;; esac
 case "$input" in *'当前的账'*'#1 lesson | 原来教训 | 旧正文'*'#2 lesson | 重复教训 | 重复正文'*'会话摘录'*'synthetic-lesson-evidence'*) ;; *) exit 84 ;; esac
 case "$input" in *'#3 lesson'*) exit 85 ;; esac
 "#,
@@ -1373,7 +1422,7 @@ fn ledger_add_edit_close_commit_one_version_with_session_evidence_and_progress()
     f.session("one", "synthetic-ledger-decision");
     f.fake_ledger(
         "## 停点\nsummary-still-works",
-        "ADD convention | path \\| rule | first\\nsecond \\\\ literal | original words\nEDIT #1 | new title | new body | changed it\nCLOSE #2 | decided | that is settled",
+        changes(&[add("convention", "path | rule", "first\nsecond \\ literal", "original words"), edit(1, "new title", "new body", "changed it"), close(2, "decided", "that is settled")]),
         r#"case "$input" in *'当前的账'*'#1'*'state'*'old title'*'old body'*'#2'*'open'*'pending'*'会话摘录'*'user: synthetic-ledger-decision'*) ;; *) exit 83 ;; esac"#,
     );
     f.ok(&["summarize"], "");
@@ -1422,7 +1471,11 @@ fn ledger_runs_after_skipped_or_failed_summary_and_uses_its_own_offset() {
         f.ok(&["adopt"], "");
         f.ok(&["ledger", "add", "open", "pending"], "");
         f.session("one", "old-ledger-message");
-        f.fake_ledger(summary, "CLOSE #1 | no longer needed | drop it", "");
+        f.fake_ledger(
+            summary,
+            changes(&[close(1, "no longer needed", "drop it")]),
+            "",
+        );
         assert_eq!(f.run(&["summarize"], "").status.success(), success);
         assert_eq!(f.ledger_item("1")["item"]["status"], "closed");
         assert_eq!(f.records(true)["total"], 0);
@@ -1435,7 +1488,7 @@ fn ledger_runs_after_skipped_or_failed_summary_and_uses_its_own_offset() {
             .unwrap();
         f.fake_ledger(
             "NOTHING_TO_CONTINUE",
-            " \nNO_CHANGES\n\t",
+            format!(" \n{}\n\t", changes(&[])),
             r#"
 case "$input" in *'当前的账'*'（空）'*'会话摘录'*'user: new-ledger-message'*) ;; *) exit 83 ;; esac
 case "$input" in *'user: old-ledger-message'*|*'#1 open'*) exit 84 ;; esac
@@ -1466,30 +1519,35 @@ fn ledger_invalid_batches_are_discarded_whole_and_failures_stop_only_automatic_a
     f.hook("one", "SessionEnd");
     let before = f.ledger();
     let history = f.ledger_item("1");
+    let prefix = add("state", "must not persist", "", "evidence");
+    let batch = |items: Vec<Value>| changes(&[vec![prefix.clone()], items].concat());
+    let mut missing = add("state", "title", "body", "evidence");
+    missing.as_object_mut().unwrap().remove("evidence");
+    let mut invalid_no = edit(1, "title", "body", "evidence");
+    invalid_no["no"] = serde_json::json!(1.5);
     let invalid = vec![
-        "ADD bogus | title | body | evidence".to_owned(),
-        "EDIT #999 | title | body | evidence".into(),
-        "EDIT #1 | title | body | evidence\nCLOSE #1 | reason | evidence".into(),
-        format!("ADD state | {} | body | evidence", "界".repeat(201)),
-        format!("ADD state | title | {} | evidence", "界".repeat(342)),
-        format!("ADD state | title | body | {}", "界".repeat(501)),
-        "ADD state | title | body | evidence\n".repeat(10), // valid prefix makes eleven
-        "ADD state | title | bad\\q | evidence".into(),
-        "ADD state | title | body | evidence\\".into(),
-        "ADD state | title\\nline | body | evidence".into(),
-        "ADD state | title | body | ".into(),
-        "ADD state | title | body | evidence | extra".into(),
-        "EDIT #+1 | title | body | evidence".into(),
-        "NO_CHANGES".into(), // must not be mixed with the valid prefix
-        "\nADD state | title | body | evidence".into(),
-        "```\nADD state | title | body | evidence\n```".into(),
+        batch(vec![add("bogus", "title", "body", "evidence")]),
+        batch(vec![edit(999, "title", "body", "evidence")]),
+        batch(vec![
+            edit(1, "title", "body", "evidence"),
+            close(1, "reason", "evidence"),
+        ]),
+        batch(vec![add("state", &"界".repeat(201), "body", "evidence")]),
+        batch(vec![add("state", "title", &"界".repeat(342), "evidence")]),
+        batch(vec![add("state", "title", "body", &"界".repeat(501))]),
+        batch(vec![add("state", "title", "body", "evidence"); 10]),
+        r#"{"changes":[{"body":"bad\q"}]}"#.into(),
+        r#"{"changes":["#.into(),
+        batch(vec![add("state", "title\nline", "body", "evidence")]),
+        batch(vec![add("state", "title", "body", "")]),
+        batch(vec![missing]),
+        batch(vec![invalid_no]),
+        "[]".into(),
+        r#"{"changes":null}"#.into(),
+        format!("```\n{}\n```", changes(&[prefix])),
     ];
     for (index, invalid) in invalid.iter().enumerate() {
-        f.fake_ledger(
-            "NOTHING_TO_CONTINUE",
-            &format!("ADD state | must not persist | | evidence\n{invalid}"),
-            "",
-        );
+        f.fake_ledger("NOTHING_TO_CONTINUE", invalid, "");
         let result = f.run(&["summarize"], "");
         assert!(!result.status.success(), "accepted {invalid}");
         assert_eq!(f.ledger(), before);
@@ -1506,22 +1564,22 @@ fn ledger_invalid_batches_are_discarded_whole_and_failures_stop_only_automatic_a
         assert_eq!(bytes, 0);
         assert_eq!(failures, index as i64 + 1);
         let expected = [
-            "第 2 行：类不合法",
-            "第 2 行：编号不存在",
-            "第 3 行：同一条既改又了结",
-            "第 2 行：标题不合格",
-            "第 2 行：正文超过 1 KiB",
-            "第 2 行：依据不合格",
+            "第 2 笔：类不合法",
+            "第 2 笔：编号不存在",
+            "第 3 笔：同一条既改又了结",
+            "第 2 笔：标题不合格",
+            "第 2 笔：正文超过 1 KiB",
+            "第 2 笔：依据不合格",
             "账的变动超过 10 笔",
-            "第 2 行：转义不支持",
-            "第 2 行：转义不支持",
-            "第 2 行：标题不合格",
-            "第 2 行：依据不合格",
-            "第 2 行：字段数不对",
-            "第 2 行：编号不合格",
-            "第 2 行：操作不支持",
-            "第 2 行：空行",
-            "第 2 行：操作不支持",
+            "不是合格的 JSON",
+            "不是合格的 JSON",
+            "第 2 笔：标题不合格",
+            "第 2 笔：依据不合格",
+            "不是合格的 JSON",
+            "第 2 笔：编号不合格",
+            "不是合格的 JSON",
+            "不是合格的 JSON",
+            "不是合格的 JSON",
         ][index];
         assert_eq!(reason, format!("输出不合格：{expected}"));
         let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
@@ -1566,7 +1624,7 @@ fn ledger_invalid_batches_are_discarded_whole_and_failures_stop_only_automatic_a
     let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
     assert_eq!(status["ledger"]["failed_sessions"], 1);
     assert!(f.ok(&["show"], "").contains("输出不合格"));
-    f.fake_ledger("NOTHING_TO_CONTINUE", "NO_CHANGES", "");
+    f.fake_ledger("NOTHING_TO_CONTINUE", changes(&[]), "");
     f.ok(&["summarize"], "");
     assert_eq!(f.ledger(), before);
     let cleared: bool = f.store().connection().query_row("SELECT ledger_bytes>0 AND ledger_failures=0 AND ledger_last_failure IS NULL AND ledger_last_failure_at IS NULL FROM sessions", [], |r| r.get(0)).unwrap();
@@ -1684,7 +1742,7 @@ i=0
 while [ ! -e "$SIDECAR_TEST_DIR/$name-$n-release" ]; do
     i=$((i + 1)); [ "$i" -lt 1000 ]; sleep 0.01
 done
-printf 'ADD state | %s-%s | committed | session evidence\n' "$name" "$n" > "$output"
+printf '{"changes":[{"op":"add","kind":"state","no":null,"title":"%s-%s","body":"committed","reason":null,"evidence":"session evidence"}]}\n' "$name" "$n" > "$output"
 exit 0
 "#,
         );
@@ -1772,10 +1830,10 @@ if [ ! -e "$SIDECAR_TEST_DIR/first-ready" ]; then
     while [ ! -e "$SIDECAR_TEST_DIR/first-release" ]; do
         i=$((i + 1)); [ "$i" -lt 1000 ]; sleep 0.01
     done
-    printf 'NO_CHANGES\n' > "$output"
+    printf '{"changes":[]}\n' > "$output"
 else
     case "$input" in *'#1 state | user-edit | user body'*) ;; *) exit 84 ;; esac
-    printf 'EDIT #1 | updated after user | new body | session-one\n' > "$output"
+    printf '{"changes":[{"op":"edit","kind":null,"no":1,"title":"updated after user","body":"new body","reason":null,"evidence":"session-one"}]}\n' > "$output"
 fi
 exit 0
 "#,
@@ -1842,7 +1900,7 @@ fn new_turn_resets_ledger_failure_limit_and_waiter_records_again() {
         .unwrap();
     f.fake_ledger(
         "NOTHING_TO_CONTINUE",
-        "ADD state | next turn | | new decision",
+        changes(&[add("state", "next turn", "", "new decision")]),
         "",
     );
     assert!(f.waiter("one").finish().status.success());
@@ -1854,7 +1912,7 @@ fn ledger_runs_append_outcomes_without_content_and_read_newest_first() {
     let f = Fixture::new();
     f.ok(&["adopt"], "");
     f.session("one", "synthetic private dialogue");
-    f.fake_ledger("## 停点\nsynthetic summary", "NO_CHANGES", "");
+    f.fake_ledger("## 停点\nsynthetic summary", changes(&[]), "");
     f.ok(&["summarize"], "");
     let runs =
         || -> Value { serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap() };
@@ -1885,7 +1943,19 @@ fn ledger_runs_append_outcomes_without_content_and_read_newest_first() {
         .unwrap()
         .write_all(dialogue("another synthetic private message").as_bytes())
         .unwrap();
-    f.fake_ledger("## 停点\nnext synthetic summary", "ADD state | private title | private body | private evidence\nADD lesson | private lesson | private body | private evidence", "");
+    f.fake_ledger(
+        "## 停点\nnext synthetic summary",
+        changes(&[
+            add("state", "private title", "private body", "private evidence"),
+            add(
+                "lesson",
+                "private lesson",
+                "private body",
+                "private evidence",
+            ),
+        ]),
+        "",
+    );
     f.ok(&["summarize"], "");
     let second = runs();
     assert_eq!(second.as_array().unwrap().len(), 2);
@@ -1907,7 +1977,7 @@ fn status_reports_unchanged_streak_alongside_fresh_summaries() {
     let f = Fixture::new();
     f.ok(&["adopt"], "");
     f.session("one", "first synthetic dialogue");
-    f.fake_ledger("## 停点\nsynthetic summary", "NO_CHANGES", "");
+    f.fake_ledger("## 停点\nsynthetic summary", changes(&[]), "");
     for _ in 0..3 {
         fs::OpenOptions::new()
             .append(true)
@@ -1971,7 +2041,7 @@ done
 "#;
         f.fake_ledger(
             "## 停点\nsynthetic summary",
-            "ADD state | never committed | body | evidence",
+            changes(&[add("state", "never committed", "body", "evidence")]),
             if during_summary { "" } else { gate },
         );
         if during_summary {
@@ -2039,7 +2109,7 @@ fn ledger_runs_keep_exact_truncation_counts_and_whole_output_diagnostics() {
     )
     .unwrap();
     for (output, reason) in [
-        (" ".to_owned(), "输出不合格：没有内容"),
+        (" ".to_owned(), "输出不合格：不是合格的 JSON"),
         ("x".repeat(128 * 1024 + 1), "输出不合格：超过 128 KiB"),
         ("🦀".repeat(32_769), "输出不合格：超过 128 KiB"),
     ] {
@@ -2063,7 +2133,7 @@ fn ledger_runs_and_status_read_older_or_absent_databases_without_writing() {
     assert!(!f.path("state").exists());
     f.ok(&["adopt"], "");
     f.session("one", "synthetic old database");
-    f.fake_ledger("## 停点\nsynthetic summary", "NO_CHANGES", "");
+    f.fake_ledger("## 停点\nsynthetic summary", changes(&[]), "");
     f.ok(&["summarize"], "");
     f.store().connection().execute_batch("DROP TABLE ledger_runs; UPDATE meta SET value='4' WHERE key='schema_version'; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
     let db = f.path("state/cairn/cairn.db");
@@ -2082,4 +2152,34 @@ fn ledger_runs_and_status_read_older_or_absent_databases_without_writing() {
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("newer than supported version 5"));
     }
+}
+
+#[test]
+fn ledger_json_preserves_original_evidence_characters() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    let evidence = "执行 cat file | grep \"a\\|b\"\n然后检查结果";
+    f.session("one", evidence);
+    let output = serde_json::json!({"changes": [{
+        "op": "add", "kind": "lesson", "no": {"ignored": true},
+        "title": "保留命令原话", "body": evidence, "reason": ["ignored"],
+        "evidence": evidence
+    }]})
+    .to_string();
+    f.fake_ledger("NOTHING_TO_CONTINUE", &output, "");
+    f.ok(&["summarize"], "");
+    let item = f.ledger_item("1");
+    assert_eq!(item["item"]["body"], evidence);
+    assert_eq!(item["changes"][0]["evidence"], evidence);
+    let schema_path = fs::read_to_string(f.path("schema-path")).unwrap();
+    assert!(!std::path::Path::new(&schema_path).exists());
+    let schema: Value =
+        serde_json::from_str(&fs::read_to_string(f.path("schema.json")).unwrap()).unwrap();
+    assert_eq!(schema["additionalProperties"], false);
+    let item_schema = &schema["properties"]["changes"]["items"];
+    assert_eq!(item_schema["additionalProperties"], false);
+    assert_eq!(
+        item_schema["required"],
+        serde_json::json!(["op", "kind", "no", "title", "body", "reason", "evidence"])
+    );
 }

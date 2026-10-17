@@ -26,7 +26,7 @@ set -eu
 input=$(cat)
 while [ "$1" != -o ]; do shift; done
 case "$input" in *'你在为一个软件项目维护"项目的账"'*)
-    printf 'NO_CHANGES\n' > "$2"
+    printf '{"changes":[]}\n' > "$2"
     exit 0 ;;
 esac
 echo $$ > "$WAITER_TEST_ROOT/model-pid"

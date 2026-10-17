@@ -613,7 +613,7 @@ fn write_ledger(
                 }
             })?
         } else {
-            "NO_CHANGES".to_owned()
+            r#"{"changes":[]}"#.to_owned()
         };
         let batch = parse(&output, &ledger)?;
         let tx = store.transaction(rusqlite::TransactionBehavior::Immediate)?;
@@ -780,9 +780,15 @@ fn generate(
     let output = tempfile::NamedTempFile::new_in(directory.path())?;
     let model = setting(connection, SETTINGS[0].0, SETTINGS[0].1)?;
     let effort = setting(connection, SETTINGS[1].0, SETTINGS[1].1)?;
-    let mut child = Command::new(codex_path().ok_or("codex 不在 PATH")?)
+    let mut command = Command::new(codex_path().ok_or("codex 不在 PATH")?);
+    command.arg("exec");
+    if output_limit == crate::ledger::sidecar::OUTPUT_LIMIT {
+        let schema = directory.path().join("ledger-schema.json");
+        fs::write(&schema, include_str!("ledger/output-schema.json"))?;
+        command.arg("--output-schema").arg(schema);
+    }
+    let mut child = command
         .args([
-            "exec",
             "--ephemeral",
             "--disable",
             "memories",

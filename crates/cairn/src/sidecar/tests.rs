@@ -35,14 +35,14 @@ impl Fixture {
         }
         std::env::set_var("PATH", format!("{}:/usr/bin:/bin", root.path().display()));
         // Existing tests configure summary behavior. Ledger calls are separate
-        // and return NO_CHANGES without running summary-specific barriers.
+        // and return {"changes":[]} without running summary-specific barriers.
         let reads_input = script.contains("cat >/dev/null") || script.contains("input=$(cat)");
         let routing = if reads_input {
             r#"
 input=$(cat)
 case "$input" in *'你在为一个软件项目维护"项目的账"'*)
     while [ "$1" != -o ]; do shift; done
-    printf 'NO_CHANGES\n' > "$2"
+    printf '{"changes":[]}\n' > "$2"
     exit 0 ;;
 esac
 "#

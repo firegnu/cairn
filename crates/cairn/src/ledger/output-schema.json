@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "op": { "type": "string", "enum": ["add", "edit", "close"] },
+          "kind": { "type": ["string", "null"], "enum": ["state", "open", "convention", "lesson", null] },
+          "no": { "type": ["integer", "null"] },
+          "title": { "type": ["string", "null"] },
+          "body": { "type": ["string", "null"] },
+          "reason": { "type": ["string", "null"] },
+          "evidence": { "type": ["string", "null"] }
+        },
+        "required": ["op", "kind", "no", "title", "body", "reason", "evidence"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["changes"],
+  "additionalProperties": false
+}
