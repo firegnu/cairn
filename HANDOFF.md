@@ -1,87 +1,51 @@
 # 交接
 
-2026-10-15 起本文件只记项目级的账：现状、下一步、悬而未决。每次会话做了什么、用户怎么说的，由 cairn 的接续摘要记（本仓库 10-11 起采用 cairn），新会话开局自动注入；更早的会话经过在 git 历史里（`git log -- HANDOFF.md`）。
+本文件只记照着执行的事实：真实环境装的是哪一版、怎么退回，机器和环境的长期事实，还没派的草稿，已知没修的问题。只在这些变了时更新。
 
-## 现在在哪
+- 会话经过、进度、待定的事、约定和经验由 cairn 记（接续摘要、项目的账、经验），开局自动注入；这里不重复。现在有没有进行中的活、worktree、测试 agent，去现场查（`git worktree list`、`corral ls`）。
+- 设计和理由在 `docs/DESIGN.md`（待定问题在 §15），每件活的经过在 `docs/任务/`（P1-01 之前的在 `docs/tasks/`）和「合并」「收尾」提交里。
+- 2026-10-23 之前的版本（各版装的经过、阶段 1–3 的进度、试点经过、下一步、悬而未决）在 git 历史里：`git log -p -- HANDOFF.md`。
 
-- **真实环境装的是 0.7.1**（10-17 装，用户：“装吧，补记也一起做”）：0.7.1 = 0.7.0 加记账输出改 JSON（P1-26），库还是版本 5，hook 定义没变、没重装；装前备份 `~/.local/state/cairn-backup-0.7.0-20261017-160210/`（sqlite `.backup`，integrity ok，版本 5），退回 0.7.0 直接换回程序即可（库结构没变）。以下是 0.7.0 那次：0.7.0 = 0.6.2 加记账留痕（P1-25）：数据库升到版本 5（只加 `ledger_runs` 一张表），每次记账留一行结果和截断统计，新命令 `cairn ledger runs`，`status` 加“最近记账的会话”。装前备份 `~/.local/state/cairn-backup-0.6.2-20261017-131451/`（sqlite `.backup`，完整性检查 ok，版本 4）；0.6.x 读不了版本 5 的库，退回要连库换回这份备份（之后写的会丢）。hook 定义没变，没重装。装时开着的会话挂的是 0.6.2 的等待进程，它们退出后新起的才留痕。
-- 0.6.2（10-16 装）= 0.6.1 加“新增一段没对话算没什么可写”（P1-22，账 #26），装前备份 `~/.local/state/cairn-backup-0.6.1-20261016-141214/`，装后 `cairn summarize` 已把 claude:2d674b08 的失败清掉。0.6.0 = 0.5.0 加经验沉淀（P1-20，账的第四类 `lesson`）；0.6.1 再给旁路的 `codex exec` 加 `--disable memories`（P1-21）。0.6.1 装前备份 `~/.local/state/cairn-backup-0.6.0-20261016-124908/`。表结构没变（版本 4），hook 定义没变，没重装 hook。装前库备份在 `~/.local/state/cairn-backup-0.5.0-20261016-115938/`（sqlite `.backup`，完整性检查 ok）；退回 0.5.0 不用换库。更早的 0.4.1 备份在 `~/.local/state/cairn-backup-0.4.1-20261016-093954/`，退回 0.4.x 要连库换回它（之后写的会丢）。Codex hook 10-16 已重装（`additionalContextLimit` 12000）并信任；Claude 的定义没变，没重装。
-- 0.4.1（10-15 装）：0.4.0 加 P1-11（旁路模型判定不值得写的会话不写记录）。装前库备份在 `~/.local/state/cairn-backup-0.4.0-20261015-195654/`。
-- 0.4.0（10-15 装）：旁路摘要（含后台写）已全部实现（P1-06～P1-10，任务书、完成记录、审查都在 `docs/任务/`）。数据库在装后第一次读写时升到版本 3；0.3.0 时的库备份在 `~/.local/state/cairn-backup-0.3.0-20261015-142959/`（复制后逐字节比对一致，没打开看内容）。0.3.0 读不了版本 3 的库，退回要连库换回这份备份（装后新写的记录会丢）。
-- 本仓库已实测过：会话退出后，后台写出摘要，下一个会话开局注入了它（10-15）。
-- 跨工具接续实测通过（10-15）：同一目录里开 Codex（`cairn/test-crosstool-1`，用完已关），开局看到了 Claude 会话的摘要和现场对比。试用中发现的问题记在 DESIGN §15 末尾五行。
-- `codex` 在 PATH 里排第一的是 IP Guardian 的包装脚本，它查完出口 IP 再调真的 codex。
-- **试点已经在跑**：
-  - Claude Code 的 hook 10-08 装了（`~/.claude/settings.json`：4 个 hook 加一条放行稳定路径 `cairn save` 的规则）。
-  - Codex 的 hook 10-10 装了（`~/.codex/hooks.json` 4 处，改前备份 `~/.codex/hooks.json.bak-20261010T071731…`）。直接启动的 Codex 要用户到 `/hooks` 里信任。
-  - 已采用的项目：owlet、paddock（10-10 起，和它的全量 HANDOFF 并存，10-24 前后用户回看）、cairn 自己（10-11 起）、ranch（采用时间没记下，10-16 ranch/main 说早已采用；原先这里漏了）。owlet 的 HANDOFF 已减到只留稳定背景，进度靠 cairn 的记录，所以**真实数据库不能随手清**。
-  - cairn 不判断谁是主控，只认 `CAIRN_DISABLE=1`。ranch（`corral`、`corral-dispatch` 技能）开 agent 时带这个变量，cairn 只留给用户直接对话的主控；其余方式开的 agent，只要目录已采用就会用 cairn。
-  - 10-15 前开的会话，开局拿到的是旧约定（每回合 `cairn save`），重开后才没有；它们存的按新规则成为版本。paddock/main 已通知停止每回合保存。
-- **paddock 已经在用 cairn**：右侧栏 Cairn 标签（paddock P5-55）调用 `cairn status --json`、`cairn show --json`、`cairn adopt`，面板开着时每 5 秒读一次（`show` 会顺手收取暂存区）；P5-78、P5-79 用 `last_seen`、`cairn list --json`、`cairn show <ID> --json`（由 paddock 主控做，进度看 paddock 的 HANDOFF）。这些输出是公开约定，动之前先看 DESIGN §7.1。
-- 没有开着的 dev/test agent，也没有未清理的 worktree 或分支。`cairn-worktrees/` 下只有编译目录 `.target`（每个工作目录用 `.target/<子目录>`）和 `p1-lab`。
-- 记忆系统（P1-01）只有设计草案，没生效：`docs/记忆系统设计草案.md`（第 12 节八个问题待定）、草稿任务 `docs/任务/P1-01-扩展成一个完整的记忆系统.md`、调研 `docs/调研/agent记忆系统现状.md`。用户 10-11 定的五条：就在本仓库里长、仍是独立程序；cairn 自己先不调用模型；自我改进先做到“经验逐条沉淀、逐条更新”；共享先做同项目里 Claude Code 和 Codex 之间、再做跨项目；P1-01 只出设计，实现另拆。草案的 M2 10-13 加注要重谈（旁路模型路线之后）。
-- 以下是 10-07 之前各阶段的情况（没变）：
-  - **阶段 1（能力实测）已完成**：门槛 A、B、C、F 在 Claude Code 2.1.289 和 Codex 0.160.0 上满足本次实测范围。报告：`docs/调研/第一阶段能力实测.md`；任务与审查记录：`docs/tasks/P1-*.md`。
-  - DESIGN 已按实测结论修订（§8.3、§9.1、§10、§14、§15），并新增**暂存区写入设计**（§6.5）：`cairn save` 只写用户私有临时目录里的暂存文件，hook 和用户命令收进数据库。经独立交叉审查两轮复核通过。
-  - **阶段 3（接入）已完成**：3a hook 适配（`hook.rs`，`cairn hook claude|codex`）、3b install / uninstall / status（`install.rs`、`status.rs`）均经交叉审查合并；3c 仓库根 `README.md` 已合并。阶段 1 探针已删除。阶段 3 的"建议验证"经用户同意写成验收条件。
-  - **阶段 2（核心）已完成**：正式 crate 在 `crates/cairn`（用户定）。已合并：2a 存储（`store.rs`、`store/schema.rs`）、2b 作用域与 Git 事实（`scope.rs`、`facts.rs`）、2c adopt / save / 暂存区收取（`adopt.rs`、`save.rs`、`spool.rs`、`ingest.rs`、`cli.rs`）、2d 注入渲染与 `cairn show`（`render.rs`、`session.rs`）、2e 回合判定（`turn.rs`）、2f 用户命令（`commands.rs`）。全部经交叉审查。
-  - 阶段 2 的任务书照用户同意，把实施计划的"建议验证"写成验收条件。
-  - 试点前 dry-run 发现并修复：注入与续跑提示里的 save 命令改用稳定路径，与安装写入的权限规则逐字一致（F1，DESIGN §9.2 补注）。
-  - **端到端冒烟测试已完成**（`docs/调研/端到端冒烟测试.md`）：真实 Claude Code、Codex 主路径走通（Codex 通过、Claude 条件通过，无已证实代码缺陷）。仓库已公开：https://github.com/firegnu/cairn（暂不加许可证，用户决定）。
+## 真实环境安装
 
-## 用户交代、一直沿用的
+- 现装 **0.7.1**（10-17）：`cargo install --path crates/cairn` 装到 `~/.cargo/bin/cairn`，稳定路径 `~/.local/share/cairn/bin/cairn` 链到它。数据库在 `~/.local/state/cairn/`，版本 5。
+- 退回 0.7.0：直接换回程序（库结构没变）。退回 0.6.x：0.6.x 读不了版本 5 的库，要连库换回 `~/.local/state/cairn-backup-0.6.2-20261017-131451/`（版本 4），之后写的会丢。
+- 历次装前的库备份都在 `~/.local/state/cairn-backup-*`（0.7.0、0.6.2、0.6.1、0.6.0、0.5.0、0.4.1、0.4.0、0.3.0，以及 `cairn-backup-20261010-before-v2` 版本 1）。库有 WAL，备份用 `sqlite3 .backup`，不直接复制文件。删不删由用户定。
+- 装新版的做法：装前用 `sqlite3 .backup` 备份库并跑完整性检查；装后核对 `cairn --version` 两个路径一致。hook 定义没变就不重装。
+- hook：Claude Code 10-08 装在 `~/.claude/settings.json`（4 个 hook，加一条放行稳定路径 `cairn save` 的规则）；Codex 10-10 装在 `~/.codex/hooks.json`（改前备份 `~/.codex/hooks.json.bak-20261010T071731…`），10-16 重装过（`additionalContextLimit` 12000）。直接启动的 Codex 要用户到 `/hooks` 里信任。卸掉用 `cairn uninstall --agent claude|codex`；对真实配置的改动要用户明确同意。
 
-- 摘要只用 Codex，不用 Claude（已写进 DESIGN D6）。
-- 派实测先说清会开多少个会话，任务书别写重（10-12：“这在干什么？不停拍agent”）。
-- 不翻 paddock 的东西（“你查你自己的就行了”）。
+## 机器和环境
 
-## 下一步
+- 已采用 cairn 的项目：cairn、paddock、ranch、owlet（pasture 也显示已采用，不纳入）。owlet 的 HANDOFF 已减到只留稳定背景，进度靠 cairn，所以**真实数据库不能随手清**。
+- paddock 面板调用 cairn 的公开命令：`status --json`、`show [<ID>] --json`、`list --json`、`adopt`（面板开着时每 5 秒读一次）。动输出前先看 DESIGN §7.1（只加不改）。
+- cairn 只认 `CAIRN_DISABLE=1`，不判断谁是主控。ranch 的 corral、corral-dispatch 技能开 agent 时带这个变量；其余方式开的 agent，目录已采用就会用 cairn。
+- PATH 里排第一的 `codex` 是 IP Guardian 的包装脚本，查完出口 IP 再调真的 codex。
+- 本机 Codex memories 是开着的（`codex features list` 显示 `memories stable true`，和官方文档说的默认关不一致，原因没查）。派出去的 Codex 带 `--disable memories`；cairn 旁路的 `codex exec` 从 0.6.1 起也带上。
+- 编译目录：`../cairn-worktrees/.target/<子目录>`，每个工作目录一个（见 AGENTS.md）。
+- `origin` = `github.com/firegnu/cairn`（public，暂不加许可证）。推送前确认没有密钥和私人数据（跑 gitleaks）。
 
-**首要：看旁路摘要在真实环境里好不好使。** 真实会话停下 3 分钟以上后，用 `cairn status`、`cairn show` 看摘要写没写、写得好不好、Codex 额度花多少（DESIGN §15）。动 `list` 的输出先看 §7.1。下面第 0 条排在它后面。
+## 实测遗留物（删不删由用户定）
 
-0. **和用户详细讨论记忆系统设计草案**：先定“智能”指什么（指望 cairn 自己做哪件事，可能改 M2）和草案 §1.2 的定位（用户没表态），再逐条过第 12 节的八个问题（主控给第 4、7、8 问补过建议）。谈定的部分并进 `docs/DESIGN.md`（D2、§6.3 末句、§7 受限入口、§13“不做”要动），再拆实现任务；第一期开工前先做一次小实测（第二个 agent 可用的命令在两家的权限和沙箱下走不走得通）。
-1. **看试点**：10-24 前后用户回看 paddock 的试点。
-2. **paddock 还想要、没做的**（见 `docs/调研/与paddock结合.md`，开不开工由用户定）：`show --json`（不带 ID）分节。做的时候按 §7.1 的“只加不改”来，新字段写进 §7.1。
-3. **三件任务**（10-15 用户让记下）：P1-11 旁路摘要先判断值不值得写（**已合并，0.4.1 已装**，用户：“安装。”；paddock 面板文字里的 “each session” 现在不太准，用户介意再让 paddock/main 去掉）；以下两件是草稿、没派，开不开工由用户定：P1-12 `show --json` 区分全文和一行（可以和第 2 条一起看）；P1-13 把 HANDOFF 的项目账搬进 cairn 做长期记忆：**设计草案 `docs/长期记忆设计草案.md` 已和用户谈定**（§1.1 L1–L12，验收 §11 五条），已并进 DESIGN，拆成 P1-14（9,000 字符小测，已合并：Codex `additionalContextLimit` 改 12000，Claude 不补测，见 DESIGN §9.1）、P1-15（存储、命令、注入，含 limit 改 12000）、P1-16（旁路模型记账）都已合并，**10-16 已装（0.5.0）**；P1-13 标为开发完成、验收中（§11 五条，进度在任务文件末尾）。**三期 10-16 已开始**：cairn 的 HANDOFF 已规整成 25 条写进账（用户：“写吧”；`cairn ledger` 查看），注入实测（Codex 新会话）收全；接着和 HANDOFF 并行用一周左右，一周后用户再定四期。10-16 用户让主控直接通知：paddock/main 在面板加账的展示（约定 §7.1），并把 paddock 的 HANDOFF 规整进账；ranch/main 规整 ranch 的 HANDOFF（ranch 早已采用，不用 adopt；10-16 已写进 17 条）；两家都照 cairn 的打样做、并行一周、HANDOFF 和 AGENTS 规矩先不动（进度看它们自己）。owlet 先不接：用户 10-16“我现在主要是你们三个库。先稳定跑着。之后再说其他的”。之后最后去掉 AGENTS 里维护 HANDOFF 的规矩。它取代了第 0 条里“项目的账”那部分；第 0 条剩下的经验手册、全局记忆以后另议。用户先试用 0.4.0 一段时间。
-4. **P1-17 适配 pi、omp、amp、agy 等 harness**（10-16 用户让记下，草稿、没派）：`docs/任务/P1-17-适配pi-omp-amp-agy等harness.md`。主控建议先调研各家 hook 能力，再由用户定接哪几家；开不开工由用户定。
-5. **P1-18 并行一段时间后删除 HANDOFF**（10-16 用户让记下，草稿、没派）：`docs/任务/P1-18-并行一段时间后删除HANDOFF.md`，即长期记忆的四期。用户：“明白了，那就并行一周后再说。”
-6. **P1-19 经验沉淀**（10-16 用户让记下，草稿、没派）：`docs/任务/P1-19-经验沉淀.md`。用户 10-16 定：cairn 只管项目里的记忆（会话记忆、长期记忆、经验沉淀），全局记忆就是各工具的全局配置文件，不归 cairn；在 paddock 设定里显示、编辑各 agent 全局设定，10-16 已通知 paddock/main（进度看 paddock）。10-16 设计已谈定（`docs/经验沉淀设计草案.md` E1–E16，验收 §12 六条），已并进 DESIGN D15；实现 P1-20 已合并（10-16，交叉审查 0 条），10-16 已装（0.6.0，用户：“装吧”）；用户按 §12 六条验收；已通知 paddock/main 面板加“经验”（`kind: "lesson"`，进度看 paddock）。
-7. **P1-23 记忆系统的后续缺口**（10-16 用户让记下，草稿、没派）：`docs/任务/P1-23-记忆系统的后续缺口.md`。三条：条目多了开局只剩标题；记下的对不对没有反馈；跨项目的经验没地方去。观察期后再谈。另一条（派出去的 agent 的坑 cairn 看不到）10-16 ranch 已改好 corral-dispatch 模板（ranch 8299e39，已装，主控核对过本机 SKILL.md 两处）：完成记录和回复加“踩过的坑”，主控汇报时转述。只对之后新写的任务文件生效。
+- `../cairn-worktrees/p1-lab/`：阶段 1 实验仓库，以及 `sidecar/`（P1-04）、`midturn/`（P1-05）、`budget/`（P1-14）、`smoke/`（冒烟）各目录；两个仓库里的 `*.before-*` 配置备份和未跟踪的合成文件。内容都是合成的。
+- 私有临时目录下的 `cairn-probe-spool-p1-*`，空的 `cairn-spool/d7de8e374f1b8ca2/`、`cairn-spool/7262111286db64b8/`。
+- 三条信任记录：`~/.claude.json` 里 `p1-lab/claude-repo` 的项目条目；`~/.codex/config.toml` 里 `p1-lab/codex-repo` 的项目信任和 SessionStart hook 的信任记录。
+- 两家工具自己保留的测试会话记录（P1-04 七个、P1-05、P1-14 三个）。
+- 详细位置见 `docs/调研/第一阶段能力实测.md` §12。
 
-8. **P1-24 记账停了但不报失败**（10-17，paddock 主控起草、cairn 主控查了代码）：`docs/任务/P1-24-记账停了但不报失败.md`。第一步“留痕”已拆成 P1-25 合并；截断（60 KiB 头尾、工具输出 500 字）用户定等看了 `ledger runs` 的截断统计再改（DESIGN §15）。
+## 还没派的草稿
 
-9. **P1-26 记账的模型输出改成 JSON**（10-17）：0.7.0 装上后 ranch 记账 4 次全失败、paddock 7 次失败 2 次（模型手写竖线、反斜线转义出错）。已合并（f1abaad），**10-17 已装（0.7.1）**；装后在 ranch、paddock 跑了 `cairn summarize` 补记，ranch 2 个、paddock 4 个会话全部记账完成，两边“记账没写成的会话”归零。10-17 晚查三个仓库：装后记账 cairn 3 次、ranch 9 次、paddock 19 次，0 失败，装时开着的旧会话退出后也都记成了。继续观察 `ledger runs` 失败率。用户：“走一段时间看看，不行就换模型”——换模型用 `cairn config sidecar.model`（摘要和记账共用）。
+- `docs/任务/P1-01-扩展成一个完整的记忆系统.md`：只有设计草案 `docs/记忆系统设计草案.md`（§12 八问待定），项目的账、经验已另做掉，剩经验手册、全局记忆。
+- `docs/任务/P1-12-show-json区分全文和一行.md`：验收用户还没说；paddock 想要的 `show --json`（不带 ID）分节（`docs/调研/与paddock结合.md`）可以一起看。
+- `docs/任务/P1-17-适配pi-omp-amp-agy等harness.md`：先调研各家 hook 能力，用户再定接哪几家。
+- `docs/任务/P1-18-并行一段时间后删除HANDOFF.md`：长期记忆的四期。
+- `docs/任务/P1-23-记忆系统的后续缺口.md`：条目多了开局只剩标题、记下的对不对没反馈、跨项目经验没地方去。
+- `docs/任务/P1-24-记账停了但不报失败.md`：第一步“留痕”已由 P1-25 做掉；剩截断（60 KiB 头尾、工具输出 500 字），等看了 `ledger runs` 的截断统计再定（DESIGN §15）。
 
-## 悬而未决
+## 已知没修的（不主动追，碰到再看）
 
-- 旁路摘要会把退出前的状态写成现在时（10-15 实测时摘要里写着“当前会话尚未退出”，因为会话记录停在 `/exit` 之前）。要不要改提示词，由用户定；主控认为不急。
-- P1-06：Codex 正常退出（`/exit`）后后台进程能不能活，没测成（`/exit` 没送达），记为未知。
-- 10-15 改后台写时主控自定、用户没表态的：安静看最近一次 hook 事件和会话记录文件修改时间里较晚的；同一条工作线上新会话开局也触发立刻写；等待进程每 10 秒查一次，心跳 60 秒没更新算死；每次调 Codex 最多 300 秒，去掉“一次最多 3 个”；补注入只补开局时已经停下的会话。
-- 并进 DESIGN 时主控自定、用户没表态的八处：版本用取代关系；注入最近 3 个会话的全文、更早的各最多 10 行；连着两次没写成不再自动试；模型做成设置，默认 `gpt-5.6-luna` / `medium`；抬头一行来源 ID；Git 事实在回合结束时采；长会话喂“上一版 + 新增”；表结构。
-- 同一个目录并排跑两个做不同任务的 agent：摘要一个会话一份不混，开局两份并排给出，现场对比分不清是谁改的。主控建议先不加东西，用户没表态。
-- 来源的最后一条记录被取代后，注入退回显示它更早的记录（10-12 观察到），改不改由用户定。要动先看 D9 和 §8.1，在隔离目录用合成输入复现。
-- P1-02 调研报告按官方文档写 Codex memories 默认关闭，本机 `codex features list` 显示 `memories stable true`，原因没查。 10-15 P1-14 的 Codex agent 开局检索了一次 `~/.codex/memories/MEMORY.md`（越过“不读工具自带的记忆文件”，已披露）；P1-15 的 Codex agent 也读过（第 228–251 行）。办法：Codex 启动时加 `--disable memories`（只管这一个会话，不改配置；已实测 `features list` 显示 false）。P1-15 的审查者、P1-16 起已加上；10-16 用户定写进 corral-dispatch 技能（所有项目派出去的 Codex 都加），ranch c4bf688 已改、已装（两份已安装副本核对过）。corral 技能（只问问题的那条路）也已加上（ranch 14fb8d9，已装；用户明确要带记忆时才去掉）。cairn 自己的旁路（写摘要、记账）10-16 起也带上（P1-21，0.6.1，用户：“补吧”）。这一条只剩官方文档和本机默认不一致的原因没查。
-- P1-04 实测的遗留物，删不删由用户定：`cairn-worktrees/p1-lab/sidecar/`（约 23 MB，含测试会话记录的副本，都是合成内容）；`p1-lab` 两个仓库里各一份 `*.before-sidecar-20261012` 配置备份；两家工具自己保留的 7 个测试会话的记录。
-- P1-05 实测的遗留物，删不删由用户定：`cairn-worktrees/p1-lab/midturn/`（脚本、日志、两个测试会话记录的副本，都是合成内容）；`p1-lab` 两个仓库里各一份 `*.before-midturn-20261013` 配置备份；两家工具自己保留的测试会话记录。
-- P1-14 实测的遗留物，删不删由用户定：`cairn-worktrees/p1-lab/budget/`（脚本、合成样例、日志、结果）；`p1-lab` 两个仓库里各一份 `*.before-budget-20261015` 配置备份；两家工具自己保留的 3 个测试会话的记录。
-- 端到端冒烟测试（`docs/调研/端到端冒烟测试.md`）的 S1-1：项目规则限制命令时 Claude 可能不确认、续跑后也不确认。0.4.0 起回合结束不再要求确认，这条可能已不适用，没复核。
-- `~/.local/state/cairn/errors.log` 10-10 有 9 条，全是 claude，来源没查（用户说暂时不用）：8 条是 SessionStart／SessionEnd 的输入解析失败，集中在 17:06–17:16（F2 施工期间，其中三条在 0.1 秒内，像是拿合成输入直接跑了 `cairn hook claude`，F2 记录里没提，没确认）；1 条是 14:58 的 Stop 处理失败，原因日志里看不出。如果解析失败来自真实会话，说明有些 Claude 会话拿不到注入；之后再出现就要查，查时在隔离目录用合成输入复现。
-- F2 升表结构时，磁盘满、进程被杀的情况没验证（靠 SQLite 事务，只测了语句失败回滚）。
-- 冒烟遗留物：`p1-lab/smoke/`；私有临时目录下空的 `cairn-spool/d7de8e374f1b8ca2/`；`p1-lab` 两个仓库里各两个未跟踪的合成文件。删不删由用户定。
-- 3c 走查在真实私有临时目录留下空目录 `cairn-spool/7262111286db64b8/`（无文件），删不删由用户定。
-- 升级前的数据库备份 `~/.local/state/cairn-backup-20261010-before-v2/`（版本 1，10-10 17:12 的状态），删不删由用户定。退回 0.1.0 的话要连数据库一起换回备份：0.1.0 不认版本 2 的库（hook 会放行、什么都不做），换回后备份之后的记录就没了。
-- 对真实配置的改动（`cairn install`／`uninstall`）照旧要用户明确同意。现状：两家都已装；卸掉用 `cairn uninstall --agent claude|codex`。
-- DESIGN 在阶段 2 中的修订：收取必须向前推进（9585ea1）；resume/fork 补注入规则与回合起点约定（a5c9141）；无 turn_key 不续跑（9f6f20e）；correct 只以 checkpoint 为目标（afd2212）；取代 / 撤回 / 恢复按 rowid 判定先后、不执行 VACUUM（a520af2）。
-- 2b 审查的建议改：空仓库、detached HEAD、脏工作区计数、upstream ref 缺失没有专项测试，可在 2c / 2d 集成时补。
-- DESIGN §6.5 已改（9585ea1）：收取必须向前推进，来源优先是尽力而为。
-- save 测试因积压回归约需 50 秒。
-- 测试里 git 超时 2 秒，并行跑多个测试时可能偶发超时（2e 审查记录），可在 2f 或之后放宽测试用超时。
-- 措辞红线只管 cairn 自动生成的文字，模型写的历史正文原样保留（用户确认）。
-- 存储层对宽权限、符号链接一律拒绝不自动修复（2a 交叉审查同意的取舍）。
-- **实测遗留物，删不删由用户决定**（详细位置见报告 §12）：
-  - `cairn-worktrees/p1-lab/` 实验目录；
-  - 私有临时目录下的 `cairn-probe-spool-p1-*` 子目录；
-  - 三条信任记录：`~/.claude.json` 里 `p1-lab/claude-repo` 的项目条目；`~/.codex/config.toml` 里 `p1-lab/codex-repo` 的项目信任和 SessionStart hook 的信任记录。
-- 已知限制（用户决定不挡阶段 2）：Codex 非交互 `exec` 有一次没复述注入内容，原因未查。
-- 远程仓库：用户 2026-10-05 建了 public 仓库 github.com/firegnu/cairn（origin），每次合并后推送；仓库是公开的，推送前确认没有密钥和私人数据（F2 推送前跑过 gitleaks）。
-- Saddle `t49-memory-design` 分支上的 T49 文档，"同仓、随 Saddle 发布"和"文件存储"两处已被本仓库 D1、D3 取代；Saddle 那边要不要补说明，由用户定。
+- 摘要会把退出前的状态写成现在时（会话记录停在 `/exit` 之前）。
+- 同一目录并排跑两个 agent：现场对比分不清是谁改的。
+- 来源的最后一条记录被取代后，注入退回显示它更早的记录（要动先看 D9 和 §8.1，在隔离目录用合成输入复现）。
+- 没测成或没查的：P1-06 Codex `/exit` 后后台进程能不能活；F2 升表结构时磁盘满、进程被杀；冒烟 S1-1（0.4.0 起可能已不适用，没复核）；Codex 非交互 `exec` 有一次没复述注入。
+- `~/.local/state/cairn/errors.log` 10-10 有 9 条 claude 的（8 条 SessionStart／SessionEnd 输入解析失败，集中在 F2 施工的 17:06–17:16；1 条 14:58 Stop 处理失败），来源没查。再出现就要查，在隔离目录用合成输入复现。
+- 测试：save 回归约 50 秒；git 超时 2 秒、1 秒时限的超时测试在并行或高负载下偶发失败，单跑、重跑都过；2b 审查建议补的空仓库、detached HEAD、脏工作区计数、upstream ref 缺失的专项测试没补。
