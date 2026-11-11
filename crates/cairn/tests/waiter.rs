@@ -7,16 +7,24 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-struct Fixture(tempfile::TempDir);
+struct Fixture(tempfile::TempDir, &'static str);
 
 impl Fixture {
     fn new() -> Self {
-        let f = Self(tempfile::tempdir().unwrap());
+        Self::for_agent("claude")
+    }
+
+    fn for_agent(agent: &'static str) -> Self {
+        let f = Self(tempfile::tempdir().unwrap(), agent);
         fs::create_dir(f.path("project")).unwrap();
         fs::create_dir(f.path("bin")).unwrap();
         fs::write(
             f.path("transcript"),
-            "{\"type\":\"user\",\"message\":{\"content\":\"synthetic\"}}\n",
+            if agent == "canter" {
+                include_str!("fixtures/transcripts/canter.jsonl")
+            } else {
+                "{\"type\":\"user\",\"message\":{\"content\":\"synthetic\"}}\n"
+            },
         )
         .unwrap();
         fs::write(
@@ -61,6 +69,7 @@ printf '## 停点\nbackground-summary\n' > "$2"
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("CODEX_HOME", self.path("codex-home"))
             .env("CLAUDE_CONFIG_DIR", self.path("claude-home"))
+            .env("CANTER_HOME", self.path("canter-home"))
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.path("bin").display()),
@@ -95,7 +104,7 @@ printf '## 停点\nbackground-summary\n' > "$2"
         String::from_utf8(output.stdout).unwrap()
     }
     fn hook(&self, sid: &str, event: &str) -> String {
-        self.ok(&["hook", "claude"], &json!({"hook_event_name":event,"session_id":sid,"cwd":self.path("project"),"transcript_path":self.path("transcript")}).to_string())
+        self.ok(&["hook", self.1], &json!({"hook_event_name":event,"session_id":sid,"cwd":self.path("project"),"transcript_path":self.path("transcript")}).to_string())
     }
     fn model_started(&self) -> i32 {
         until(|| {
@@ -187,32 +196,40 @@ impl Drop for Fixture {
 
 #[test]
 fn hooks_return_without_waiting_and_start_a_detached_worker() {
-    for event in ["Stop", "SessionEnd", "SessionStart"] {
-        let f = Fixture::new();
-        if event == "Stop" {
-            f.store().connection().execute("INSERT INTO events(source_id,kind,at) VALUES ('claude:old','session_ended',?1)", [cairn::save::now()]).unwrap();
+    for agent in ["claude", "canter"] {
+        for event in ["Stop", "SessionEnd", "SessionStart"] {
+            let f = Fixture::for_agent(agent);
+            if event == "Stop" {
+                f.store()
+                    .connection()
+                    .execute(
+                        "INSERT INTO events(source_id,kind,at) VALUES (?1,'session_ended',?2)",
+                        [format!("{agent}:old"), cairn::save::now()],
+                    )
+                    .unwrap();
+            }
+            let started = Instant::now();
+            let text = f.hook(
+                if event == "SessionStart" {
+                    "new"
+                } else {
+                    "old"
+                },
+                event,
+            );
+            assert!(
+                started.elapsed() < Duration::from_millis(1500),
+                "hook waited for the model"
+            );
+            if event != "SessionStart" {
+                assert!(text.is_empty());
+            }
+            let waiter = f.model_started();
+            assert_eq!(unsafe { libc::getsid(waiter) }, waiter);
+            assert_eq!(unsafe { libc::getpgid(waiter) }, waiter);
+            assert!(!f.ok(&["--help"], "").contains("__wait"));
+            f.release_and_wait(waiter);
         }
-        let started = Instant::now();
-        let text = f.hook(
-            if event == "SessionStart" {
-                "new"
-            } else {
-                "old"
-            },
-            event,
-        );
-        assert!(
-            started.elapsed() < Duration::from_millis(1500),
-            "hook waited for the model"
-        );
-        if event != "SessionStart" {
-            assert!(text.is_empty());
-        }
-        let waiter = f.model_started();
-        assert_eq!(unsafe { libc::getsid(waiter) }, waiter);
-        assert_eq!(unsafe { libc::getpgid(waiter) }, waiter);
-        assert!(!f.ok(&["--help"], "").contains("__wait"));
-        f.release_and_wait(waiter);
     }
 }
 
@@ -335,7 +352,7 @@ fn unadopted_waiter_releases_its_lease_and_readoption_can_start_a_summary() {
 
 #[test]
 fn prompts_supplement_only_stopped_sessions_and_each_new_version_only_once() {
-    for agent in ["claude", "codex"] {
+    for agent in ["claude", "codex", "canter"] {
         let f = Fixture::new();
         let store = f.store();
         store.connection().execute("UPDATE sessions SET waiter_id='occupied',waiter_beat_at=?1,last_event_at='2000-01-01T00:00:00.000Z'", [cairn::save::now()]).unwrap();
@@ -423,4 +440,68 @@ fn prompts_supplement_only_stopped_sessions_and_each_new_version_only_once() {
             .unwrap();
         assert_eq!(count, 1);
     }
+}
+
+#[test]
+fn canter_reconnect_starts_pending_worker_without_consuming_context() {
+    let f = Fixture::for_agent("canter");
+    let store = f.store();
+    let c = store.connection();
+    c.execute("UPDATE sessions SET waiter_id='occupied',waiter_beat_at=?1,last_event_at='2000-01-01T00:00:00.000Z'", [cairn::save::now()]).unwrap();
+    c.execute("UPDATE events SET at='2000-01-01T00:00:00.000Z'", [])
+        .unwrap();
+    f.ok(&["ledger", "add", "state", "开局账"], "已见过的账");
+    assert!(f.hook("receiver", "SessionStart").contains("已见过的账"));
+    f.ok(&["ledger", "add", "open", "断线期间的账"], "待补的账");
+    c.execute("INSERT INTO records(id,project_id,line_path,source_id,kind,body,created_at,written_by)
+        SELECT 'late-summary',project_id,line_path,source_id,'checkpoint','## 停点\n待补的摘要',?1,'sidecar'
+        FROM sessions WHERE source_id='canter:old'", [cairn::save::now()]).unwrap();
+    let injection_state = || -> (i64, Option<i64>) {
+        c.query_row(
+            "SELECT (SELECT count(*) FROM injections WHERE source_id='canter:receiver'),
+            ledger_injected_version FROM sessions WHERE source_id='canter:receiver'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    let before = injection_state();
+    assert_eq!(before, (0, Some(1)));
+    c.execute(
+        "UPDATE sessions SET waiter_id=NULL,waiter_beat_at=NULL WHERE source_id='canter:old'",
+        [],
+    )
+    .unwrap();
+    let output = f.ok(
+        &["hook", "canter"],
+        &json!({
+            "hook_event_name":"SessionStart", "session_id":"receiver", "source":"resume",
+            "cwd":f.path("project"), "transcript_path":f.path("receiver-events.jsonl"),
+            "accepts_additional_context":false
+        })
+        .to_string(),
+    );
+    let waiter = f.model_started();
+    assert!(
+        output.is_empty(),
+        "reconnection output must be empty: {output}"
+    );
+    assert_eq!(injection_state(), before);
+    let observed: (String, String) = c.query_row(
+        "SELECT e.detail,h.at FROM events e JOIN hook_seen h ON h.agent='canter' AND h.event='SessionStart'
+         WHERE e.source_id='canter:receiver' AND e.kind='session_started' AND e.at=h.at ORDER BY e.id DESC LIMIT 1", [],
+        |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(observed.0, "resume");
+    assert!(chrono::DateTime::parse_from_rfc3339(&observed.1).is_ok());
+    f.release_and_wait(waiter);
+    assert_eq!(injection_state(), before);
+    let supplemented: Value =
+        serde_json::from_str(&f.hook("receiver", "UserPromptSubmit")).unwrap();
+    let text = supplemented["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("background-summary"), "{text}");
+    assert!(text.contains("待补的账"), "{text}");
+    assert_eq!(injection_state(), (1, Some(2)));
+    assert!(f.hook("receiver", "UserPromptSubmit").is_empty());
 }

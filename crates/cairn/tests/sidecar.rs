@@ -54,6 +54,7 @@ impl Fixture {
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("CODEX_HOME", self.path("codex"))
             .env("CLAUDE_CONFIG_DIR", self.path("claude"))
+            .env("CANTER_HOME", self.path("canter"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("TMPDIR", self.0.path())
@@ -2145,12 +2146,12 @@ fn ledger_runs_and_status_read_older_or_absent_databases_without_writing() {
     assert!(!f.ok(&["status"], "").contains("最近记账的会话"));
     assert_eq!(fs::read(&db).unwrap(), before);
     let c = rusqlite::Connection::open(&db).unwrap();
-    c.execute_batch("UPDATE meta SET value='6' WHERE key='schema_version'")
+    c.execute_batch("UPDATE meta SET value='7' WHERE key='schema_version'")
         .unwrap();
     for args in [vec!["ledger", "runs", "--json"], vec!["status", "--json"]] {
         let output = f.run(&args, "");
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("newer than supported version 5"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("newer than supported version 6"));
     }
 }
 
@@ -2182,4 +2183,62 @@ fn ledger_json_preserves_original_evidence_characters() {
         item_schema["required"],
         serde_json::json!(["op", "kind", "no", "title", "body", "reason", "evidence"])
     );
+}
+
+#[test]
+fn canter_sidecar_writes_summary_and_ledger_and_skips_metadata_only_append() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    fs::write(
+        f.path("one.jsonl"),
+        include_str!("fixtures/transcripts/canter.jsonl"),
+    )
+    .unwrap();
+    f.hook_as("canter", "one", "SessionStart");
+    f.hook_as("canter", "one", "UserPromptSubmit");
+    let checks = r#"
+case "$input" in *'user: 检查合成文件'*'assistant: 检查完成'*'assistant（没说完）: 还有一部'*) ;; *) exit 83 ;; esac
+case "$input" in *'忽略'*) exit 84 ;; esac
+"#;
+    f.fake_ledger(
+        "## 停点\ncanter-summary",
+        changes(&[add("state", "canter 的现状", "检查完成", "检查合成文件")]),
+        checks,
+    );
+    f.fake_codex(checks, "## 停点\ncanter-summary");
+    let output = f.run(&["summarize"], "");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let records = f.records(false);
+    assert_eq!(records["total"], 1);
+    assert_eq!(records["records"][0]["source_id"], "canter:one");
+    assert_eq!(records["records"][0]["agent"], "canter");
+    assert_eq!(records["records"][0]["written_by"], "sidecar");
+    assert_eq!(records["records"][0]["summary"], "canter-summary");
+    assert_eq!(f.ledger()["items"][0]["created_by"], "canter:one");
+    assert_eq!(f.ledger()["items"][0]["body"], "检查完成");
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(f.path("one.jsonl"))
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({"type":"turn.retracted","seq":16,"turnId":"turn-1"})
+    )
+    .unwrap();
+    f.fake_ledger("invalid if called", changes(&[]), "exit 91");
+    f.fake_codex("exit 91", "invalid if called");
+    f.ok(&["summarize"], "");
+    assert_eq!(f.records(false), records);
+    let state: (i64, i64, i64, i64) = f.store().connection().query_row(
+        "SELECT summarized_bytes,ledger_bytes,failures,ledger_failures FROM sessions WHERE source_id='canter:one'",
+        [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    let end = file.metadata().unwrap().len() as i64;
+    assert_eq!(state, (end, end, 0, 0));
 }

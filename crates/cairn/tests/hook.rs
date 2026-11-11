@@ -19,6 +19,10 @@ const CASES: &[(&str, &str)] = &[
     ("codex", "stop_continued"),
     ("codex", "session_end"),
     ("codex", "interrupt"),
+    ("canter", "session_start"),
+    ("canter", "user_prompt_submit"),
+    ("canter", "stop"),
+    ("canter", "session_end"),
 ];
 
 struct Fixture {
@@ -36,6 +40,9 @@ fn isolated(key: &std::ffi::OsStr) -> bool {
             "XDG_CONFIG_HOME",
             "TMPDIR",
             "CAIRN_DISABLE",
+            "CANTER_HOME",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
             "PATH",
         ]
         .contains(&key.to_str().unwrap_or(""))
@@ -56,6 +63,9 @@ impl Fixture {
         for key in ["HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "TMPDIR"] {
             std::env::set_var(key, root.path());
         }
+        std::env::set_var("CANTER_HOME", root.path().join("canter"));
+        std::env::set_var("CODEX_HOME", root.path().join("codex"));
+        std::env::set_var("CLAUDE_CONFIG_DIR", root.path().join("claude"));
         std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
         std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
         fs::create_dir(root.path().join("project")).unwrap();
@@ -812,7 +822,7 @@ fn version_1_database_reports_nothing_seen_until_a_hook_upgrades_it() {
     assert_eq!(version(&connection), "1");
 
     assert!(!f.hook("claude", "session_start").is_empty());
-    assert_eq!(version(&connection), "5");
+    assert_eq!(version(&connection), "6");
     assert!(last_seen(&f, "claude", "SessionStart").is_string());
 }
 
@@ -944,4 +954,202 @@ fn stop_keeps_previous_git_facts_when_collection_fails_and_still_updates_path() 
         .unwrap();
     assert!(path.ends_with("after-failure"));
     assert!(f.log().contains("codex Stop git"));
+}
+
+#[test]
+fn canter_hooks_inject_context_and_record_main_session_without_turn_key() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "");
+    f.run(&["save"], "## 停点\n此前的合成摘要");
+    f.run(&["ledger", "add", "state", "合成现状"], "账的正文");
+    let started: Value = serde_json::from_str(&f.hook("canter", "session_start")).unwrap();
+    let text = started["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    for expected in [
+        "canter:synthetic-canter-session",
+        "此前的合成摘要",
+        "账的正文",
+    ] {
+        assert!(text.contains(expected), "{text}");
+    }
+    assert!(f.hook("canter", "user_prompt_submit").is_empty());
+    f.run(&["ledger", "add", "open", "新的事项"], "稍后决定");
+    let supplement: Value = serde_json::from_str(&f.hook("canter", "user_prompt_submit")).unwrap();
+    assert!(supplement["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("稍后决定"));
+    assert!(f.hook("canter", "user_prompt_submit").is_empty());
+    assert!(f.hook("canter", "stop").is_empty());
+    assert!(f.hook("canter", "session_end").is_empty());
+    for event in ["Interrupt", "StopFailure"] {
+        assert!(f
+            .run(
+                &["hook", "canter"],
+                &serde_json::json!({"hook_event_name":event}).to_string()
+            )
+            .is_empty());
+    }
+    let store = cairn::store::Store::open(f.db(), cairn::store::BusyTimeout::UserCommand).unwrap();
+    let c = store.connection();
+    let source: (String, String) = c
+        .query_row(
+            "SELECT id,agent FROM sources WHERE agent='canter'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        source,
+        ("canter:synthetic-canter-session".into(), "canter".into())
+    );
+    let mut q = c
+        .prepare("SELECT detail FROM events WHERE source_id=?1 AND kind='turn_started'")
+        .unwrap();
+    let keys = q
+        .query_map([&source.0], |r| r.get::<_, Option<String>>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(keys, vec![None; 3]);
+    assert_eq!(seen(&f).len(), 4);
+    for (_, event, at) in seen(&f) {
+        assert_eq!(last_seen(&f, "canter", &event), at);
+    }
+    let reason: String = c
+        .query_row(
+            "SELECT detail FROM events WHERE source_id=?1 AND kind='session_ended'",
+            [&source.0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, "client_exit");
+    assert!(!f.db().with_file_name("errors.log").exists());
+}
+
+#[test]
+fn canter_subsession_events_are_ignored_before_metadata_or_storage_access() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "");
+    let spool = cairn::spool::Spool::open(f.root.path(), &f.db()).unwrap();
+    assert_eq!(fs::read_dir(spool.path()).unwrap().count(), 0);
+    for case in ["session_start", "user_prompt_submit", "stop", "session_end"] {
+        for agent_id in [
+            serde_json::json!("child"),
+            Value::Null,
+            serde_json::json!({"future":true}),
+        ] {
+            let mut payload = f.payload("canter", case);
+            payload["agent_id"] = agent_id;
+            assert!(f.run(&["hook", "canter"], &payload.to_string()).is_empty());
+        }
+    }
+    let store = cairn::store::Store::open(f.db(), cairn::store::BusyTimeout::UserCommand).unwrap();
+    for table in [
+        "events",
+        "sources",
+        "sessions",
+        "hook_seen",
+        "injections",
+        "records",
+    ] {
+        let count: i64 = store
+            .connection()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+    drop(store);
+    fs::write(f.db(), "must not open this database").unwrap();
+    for event in EVENTS {
+        let payload = serde_json::json!({"hook_event_name":event,"agent_id":"child","session_id":[],"cwd":null});
+        let output = f.process("canter", &payload.to_string());
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+    assert_eq!(
+        fs::read_to_string(f.db()).unwrap(),
+        "must not open this database"
+    );
+    assert!(!f.db().with_file_name("errors.log").exists());
+    assert_eq!(fs::read_dir(spool.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn version_5_status_reads_old_observations_without_upgrading() {
+    let f = Fixture::new();
+    f.run(&["adopt"], "");
+    let c = rusqlite::Connection::open(f.db()).unwrap();
+    c.execute_batch("DROP TABLE hook_seen;
+        CREATE TABLE hook_seen (
+            project_id INTEGER NOT NULL REFERENCES projects(id),
+            agent TEXT NOT NULL CHECK (agent IN ('claude','codex')),
+            event TEXT NOT NULL CHECK (event IN ('SessionStart','UserPromptSubmit','Stop','SessionEnd')),
+            at TEXT NOT NULL, PRIMARY KEY (project_id,agent,event));
+        INSERT INTO hook_seen SELECT id,'claude','Stop','2026-11-10T01:02:03.004Z' FROM projects;
+        INSERT INTO hook_seen SELECT id,'codex','SessionStart','2026-11-10T02:03:04.005Z' FROM projects;
+        UPDATE meta SET value='5' WHERE key='schema_version';").unwrap();
+    let before = seen(&f);
+    assert_eq!(last_seen(&f, "claude", "Stop"), "2026-11-10T01:02:03.004Z");
+    assert_eq!(
+        last_seen(&f, "codex", "SessionStart"),
+        "2026-11-10T02:03:04.005Z"
+    );
+    for event in EVENTS {
+        assert_eq!(last_seen(&f, "canter", event), Value::Null);
+    }
+    assert!(f.run(&["status"], "").contains("canter: 未完整安装"));
+    let version: String = c
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, "5");
+    assert_eq!(seen(&f), before);
+    f.hook("canter", "session_start");
+    assert!(last_seen(&f, "canter", "SessionStart").is_string());
+    assert!(before.iter().all(|row| seen(&f).contains(row)));
+}
+
+#[test]
+fn canter_resume_accepting_or_missing_context_flag_keeps_normal_injection() {
+    for (agent, accepts) in [
+        ("canter", None),
+        ("canter", Some(true)),
+        ("claude", Some(false)),
+        ("codex", Some(false)),
+    ] {
+        let f = Fixture::new();
+        f.run(&["adopt"], "");
+        f.run(&["save"], "## 停点\n已见过的摘要");
+        f.run(&["ledger", "add", "state", "开局账"], "开局正文");
+        assert!(f.hook(agent, "session_start").contains("已见过的摘要"));
+        f.run(&["save"], "## 停点\n恢复时的新摘要");
+        f.run(&["ledger", "add", "open", "恢复时的新账"], "恢复正文");
+        let mut resume = f.payload(agent, "session_start");
+        resume["source"] = "resume".into();
+        if let Some(accepts) = accepts {
+            resume["accepts_additional_context"] = accepts.into();
+        }
+        let output: Value =
+            serde_json::from_str(&f.run(&["hook", agent], &resume.to_string())).unwrap();
+        let text = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("恢复时的新摘要"), "{agent}: {text}");
+        assert!(text.contains("恢复正文"), "{agent}: {text}");
+        assert!(!text.contains("已见过的摘要"), "{agent}: {text}");
+        let source = format!("{agent}:synthetic-{agent}-session");
+        let store =
+            cairn::store::Store::open(f.db(), cairn::store::BusyTimeout::UserCommand).unwrap();
+        let state: (i64, i64) = store.connection().query_row(
+            "SELECT (SELECT count(*) FROM injections WHERE source_id=?1),ledger_injected_version FROM sessions WHERE source_id=?1",
+            [&source], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(state, (2, 2));
+        assert!(f.hook(agent, "user_prompt_submit").is_empty());
+    }
 }

@@ -159,3 +159,18 @@ CREATE TABLE ledger_runs (
 );
 CREATE INDEX ledger_runs_project ON ledger_runs(project_id, id);
 "#;
+
+/// Add canter to the hook observation constraint, preserving existing rows.
+pub(super) const V6: &str = r#"
+CREATE TABLE hook_seen_v6 (
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex', 'canter')),
+    event TEXT NOT NULL CHECK (event IN ('SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd')),
+    at TEXT NOT NULL,
+    PRIMARY KEY (project_id, agent, event)
+);
+INSERT INTO hook_seen_v6 (project_id, agent, event, at)
+    SELECT project_id, agent, event, at FROM hook_seen;
+DROP TABLE hook_seen;
+ALTER TABLE hook_seen_v6 RENAME TO hook_seen;
+"#;

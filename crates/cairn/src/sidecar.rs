@@ -579,6 +579,7 @@ fn write_ledger(
     let agent = match session.agent.as_str() {
         "claude" => Agent::Claude,
         "codex" => Agent::Codex,
+        "canter" => Agent::Canter,
         _ => return Err("会话类型不支持".into()),
     };
     let excerpt = crate::transcript::extract(agent, &session.path, session.ledger_bytes as u64)
@@ -681,6 +682,7 @@ fn write_summary(
     let agent = match session.agent.as_str() {
         "claude" => Agent::Claude,
         "codex" => Agent::Codex,
+        "canter" => Agent::Canter,
         _ => return Err("会话类型不支持".into()),
     };
     let previous = previous_checkpoint(store.connection(), session)?;

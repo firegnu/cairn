@@ -25,6 +25,7 @@ impl Fixture {
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("CODEX_HOME", self.path("codex"))
             .env("CLAUDE_CONFIG_DIR", self.path("claude"))
+            .env("CANTER_HOME", self.path("canter"))
             .env("TMPDIR", self.0.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -46,10 +47,11 @@ impl Fixture {
         String::from_utf8(o.stdout).unwrap()
     }
     fn config(&self, agent: &str) -> PathBuf {
-        self.path(if agent == "claude" {
-            "claude/settings.json"
-        } else {
-            "codex/hooks.json"
+        self.path(match agent {
+            "claude" => "claude/settings.json",
+            "codex" => "codex/hooks.json",
+            "canter" => "canter/config.json",
+            _ => unreachable!(),
         })
     }
     fn seed(&self, agent: &str, text: &str) {
@@ -235,7 +237,7 @@ fn install_preserves_other_text_and_uses_stable_paths() {
 #[test]
 fn repeated_install_is_byte_identical_and_uninstall_preserves_others_and_backups() {
     let f = Fixture::new();
-    for agent in ["claude", "codex"] {
+    for agent in ["claude", "codex", "canter"] {
         let original = original();
         f.seed(agent, &original);
         f.ok(&["install", "--agent", agent, "--yes"]);
@@ -535,7 +537,7 @@ fn review_r2_duplicate_keys_are_rejected_before_any_write() {
         r#"{"hooks":{},"custom":[{"nested":{"key":1,"key":2}}]}"#,
         r#"{"hooks":{},"custom":{"key":1,"\u006bey":2}}"#,
     ] {
-        for agent in ["claude", "codex"] {
+        for agent in ["claude", "codex", "canter"] {
             let f = Fixture::new();
             f.seed(agent, original);
             for verb in ["install", "uninstall"] {
@@ -578,4 +580,119 @@ fn review_r3_round_trip_cleans_empty_hook_and_permission_containers() {
         value(&f.config("claude")),
         serde_json::json!({"theme":"dark"})
     );
+}
+
+#[test]
+fn canter_install_requires_a_directory_and_writes_only_hooks_after_confirmation() {
+    let f = Fixture::new();
+    for verb in ["install", "uninstall"] {
+        for flag in ["--dry-run", "--yes"] {
+            let output = f.run(&[verb, "--agent", "canter", flag]);
+            assert!(!output.status.success());
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(error.lines().count(), 1);
+            assert!(error.contains("canter 配置目录不存在"), "{error}");
+            assert!(!f.path("canter").exists());
+            assert!(!f.path("data").exists());
+        }
+    }
+    fs::create_dir(f.path("canter")).unwrap();
+    f.ok(&["install", "--agent", "canter", "--dry-run"]);
+    assert!(!f.config("canter").exists());
+    let output = f.run(&["install", "--agent", "canter"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--yes"));
+    assert!(!f.config("canter").exists());
+    assert!(!f.path("data").exists());
+    f.ok(&["install", "--agent", "canter", "--yes"]);
+    let config = value(&f.config("canter"));
+    assert_eq!(
+        config.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["hooks"]
+    );
+    assert_eq!(config["hooks"].as_object().unwrap().len(), 4);
+    for event in ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"] {
+        assert_eq!(
+            config["hooks"][event],
+            serde_json::json!([{"hooks":[{
+                "type":"command", "command":format!("{} hook canter", f.path("data/cairn/bin/cairn").display())
+            }]}])
+        );
+    }
+    f.ok(&["uninstall", "--agent", "canter", "--dry-run"]);
+    assert_eq!(value(&f.config("canter")), config);
+    f.ok(&["uninstall", "--agent", "canter", "--yes"]);
+    assert_eq!(value(&f.config("canter")), serde_json::json!({}));
+    assert!(!f.path("canter/rules.json").exists());
+
+    fs::create_dir(f.path(".canter")).unwrap();
+    let output = f
+        .command(&["install", "--agent", "canter", "--yes"])
+        .env_remove("CANTER_HOME")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(f.path(".canter/config.json").exists());
+}
+
+#[test]
+fn canter_status_is_optional_and_leaves_other_agents_unchanged() {
+    let f = Fixture::new();
+    f.ok(&["install", "--agent", "claude", "--yes"]);
+    f.ok(&["install", "--agent", "codex", "--yes"]);
+    let baseline: Value = serde_json::from_str(&f.ok(&["status", "--json"])).unwrap();
+    let check = |installed: bool| {
+        let status: Value = serde_json::from_str(&f.ok(&["status", "--json"])).unwrap();
+        assert_eq!(status["agents"]["canter"]["installed"], installed);
+        assert!(status["agents"]["canter"].get("error").is_none());
+        assert_eq!(
+            status["agents"]["canter"]["last_seen"],
+            serde_json::json!({
+                "SessionStart":null,"UserPromptSubmit":null,"Stop":null,"SessionEnd":null
+            })
+        );
+        for agent in ["claude", "codex"] {
+            assert_eq!(status["agents"][agent], baseline["agents"][agent]);
+        }
+        let text = f.ok(&["status"]);
+        assert!(text.contains(if installed {
+            "canter: 已安装"
+        } else {
+            "canter: 未完整安装"
+        }));
+        assert!(!text.contains("配置错误"));
+        assert!(!f.path("state").exists());
+    };
+    check(false);
+    assert!(!f.path("canter").exists());
+    fs::create_dir(f.path("canter")).unwrap();
+    check(false);
+    for invalid in ["{broken", "[]", r#"{"hooks":{},"hooks":{}}"#] {
+        f.seed("canter", invalid);
+        check(false);
+        for verb in ["install", "uninstall"] {
+            assert!(!f
+                .run(&[verb, "--agent", "canter", "--yes"])
+                .status
+                .success());
+            assert_eq!(fs::read_to_string(f.config("canter")).unwrap(), invalid);
+        }
+    }
+    fs::remove_file(f.config("canter")).unwrap();
+    fs::create_dir(f.config("canter")).unwrap();
+    check(false);
+    fs::remove_dir(f.config("canter")).unwrap();
+    f.ok(&["install", "--agent", "canter", "--yes"]);
+    check(true);
+    let output = f
+        .command(&["status", "--json"])
+        .env("CANTER_HOME", "relative")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["agents"]["canter"]["installed"], false);
+    for agent in ["claude", "codex"] {
+        assert_eq!(status["agents"][agent], baseline["agents"][agent]);
+    }
 }
