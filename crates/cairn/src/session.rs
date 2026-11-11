@@ -32,13 +32,14 @@ pub struct SessionStarted<'a> {
 /// Explicit database and trusted spool root keep the core independent of hook
 /// JSON and allow callers to isolate all filesystem effects.
 pub fn start(event: &SessionStarted<'_>, database: &Path, root: &Path) -> Result<Option<Rendered>> {
-    start_with_waiters(event, database, root, |_, _, _| {})
+    start_with_waiters(event, database, root, true, |_, _, _| {})
 }
 
 pub(crate) fn start_with_waiters(
     event: &SessionStarted<'_>,
     database: &Path,
     root: &Path,
+    inject_context: bool,
     launch: impl FnOnce(&rusqlite::Connection, &crate::scope::Scope, &str),
 ) -> Result<Option<Rendered>> {
     if event.disabled {
@@ -106,6 +107,10 @@ pub(crate) fn start_with_waiters(
     // Spawn without waiting. The child acquires its lease after this transaction
     // closes; registration and injections still roll back together on failure.
     launch(&tx, &scope, &source_id);
+    if !inject_context {
+        tx.commit()?;
+        return Ok(None);
+    }
     let rendered = crate::render::render(
         &tx,
         &crate::render::Request {

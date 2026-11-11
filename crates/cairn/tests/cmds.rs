@@ -428,6 +428,9 @@ fn isolated_key(key: &OsStr) -> bool {
             "XDG_CONFIG_HOME",
             "XDG_STATE_HOME",
             "XDG_DATA_HOME",
+            "CANTER_HOME",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
             "TMPDIR",
         ]
         .contains(&key.to_str().unwrap_or(""))
@@ -446,6 +449,7 @@ impl Fixture {
         for key in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "TMPDIR"] {
             std::env::set_var(key, root.path());
         }
+        std::env::set_var("CANTER_HOME", root.path().join("canter"));
         std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
         std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
         std::env::set_var("GIT_CONFIG_COUNT", "0");
@@ -1627,7 +1631,7 @@ fn json_contract_show_collects_upgrades_and_preserves_body_and_correction() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, "5");
+    assert_eq!(version, "6");
     for key in [
         "project_id",
         "project_key",

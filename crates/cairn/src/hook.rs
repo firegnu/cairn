@@ -12,6 +12,7 @@ use std::time::Duration;
 pub enum Agent {
     Claude,
     Codex,
+    Canter,
 }
 
 /// Hook stdout has no user-command newline or error exit code.
@@ -30,12 +31,14 @@ impl Agent {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Canter => "canter",
         }
     }
     fn core(self) -> crate::turn::Agent {
         match self {
             Self::Claude => crate::turn::Agent::Claude,
             Self::Codex => crate::turn::Agent::Codex,
+            Self::Canter => crate::turn::Agent::Canter,
         }
     }
 }
@@ -45,6 +48,13 @@ impl Agent {
 #[derive(Deserialize)]
 struct Envelope {
     hook_event_name: String,
+    #[serde(default, deserialize_with = "field_present")]
+    agent_id: bool,
+}
+
+fn field_present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(true)
 }
 #[derive(Deserialize)]
 struct Metadata {
@@ -55,6 +65,7 @@ struct Metadata {
     turn_id: Option<String>,
     transcript_path: Option<String>,
     reason: Option<String>,
+    accepts_additional_context: Option<bool>,
 }
 
 fn database_path() -> crate::store::Result<PathBuf> {
@@ -78,6 +89,9 @@ pub fn run(agent: Agent, input: &mut impl Read, paths: Option<(&Path, &Path)>) -
     let result = (|| -> crate::cli::Result<String> {
         read?;
         let envelope = envelope?;
+        if matches!(agent, Agent::Canter) && envelope.agent_id {
+            return Ok(String::new());
+        }
         let event = envelope.hook_event_name.as_str();
         if !matches!(
             event,
@@ -150,6 +164,7 @@ fn dispatch(
             },
             database,
             root,
+            !matches!(agent, Agent::Canter) || metadata.accepts_additional_context != Some(false),
             |connection, scope, source| {
                 if let Some(executable) = executable {
                     match crate::sidecar::pending_sessions(connection, scope, source) {
@@ -199,6 +214,7 @@ fn dispatch(
     let key = match agent {
         Agent::Claude => metadata.prompt_id.as_deref(),
         Agent::Codex => metadata.turn_id.as_deref(),
+        Agent::Canter => None,
     };
     let report = match event {
         "UserPromptSubmit" => crate::turn::turn_started(context, key),

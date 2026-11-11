@@ -13,6 +13,8 @@
 //! instruction wrapper or environment wrapper (beginning with a cwd field)
 //! are excluded, including from the dialogue check. Ordinary mentions and
 //! incomplete wrappers remain user text; this is structural recognition only.
+//! Canter reads only completed userMessage/agentMessage items; interrupted
+//! replies are labelled unfinished. Rewind/retraction markers are skipped.
 //!
 //! Tool arguments/results retain at most 500 Unicode scalar values, including
 //! a trailing `…` when shortened. The total UTF-8 budget includes labels and
@@ -135,6 +137,7 @@ pub fn extract(agent: Agent, path: &Path, from: u64) -> Result<Excerpt, Error> {
         match agent {
             Agent::Claude => claude(&value, &mut output),
             Agent::Codex => codex(&value, &mut output),
+            Agent::Canter => canter(&value, &mut output),
         }
         end_offset += read as u64;
     }
@@ -321,6 +324,30 @@ fn codex(value: &Value, output: &mut Output) {
         Some("custom_tool_call_output" | "function_call_output") => {
             if let (Some(id), Some(result)) = (payload["call_id"].as_str(), payload.get("output")) {
                 output.result(id, &value_text(result));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn canter(value: &Value, output: &mut Output) {
+    if value["type"] != "item.completed" {
+        return;
+    }
+    let item = &value["item"];
+    match item["type"].as_str() {
+        Some("userMessage") if item["content"].is_array() => {
+            output.dialogue("user", &text_blocks(&item["content"], &["text"]));
+        }
+        Some("agentMessage") => {
+            let role = match item.get("status") {
+                None => "assistant",
+                Some(status) if status == "completed" => "assistant",
+                Some(status) if status == "interrupted" => "assistant（没说完）",
+                _ => return,
+            };
+            if let Some(text) = item["text"].as_str() {
+                output.dialogue(role, text);
             }
         }
         _ => {}

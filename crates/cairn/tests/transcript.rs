@@ -9,12 +9,18 @@ use tempfile::TempDir;
 const CLAUDE: &str = include_str!("fixtures/transcripts/claude.jsonl");
 const CODEX: &str = include_str!("fixtures/transcripts/codex.jsonl");
 const CODEX_CONTEXT: &str = include_str!("fixtures/transcripts/codex-context.jsonl");
+const CANTER: &str = include_str!("fixtures/transcripts/canter.jsonl");
 
 fn message(agent: Agent, role: &str, text: &str) -> String {
     let value = match agent {
         Agent::Claude => json!({"type":role,"message":{"role":role,"content":text}}),
         Agent::Codex => json!({"type":"response_item","payload":{
             "type":"message","role":role,"content":[{"type":"output_text","text":text}]
+        }}),
+        Agent::Canter => json!({"type":"item.completed","item": if role == "user" {
+            json!({"type":"userMessage","content":[{"type":"text","text":text}]})
+        } else {
+            json!({"type":"agentMessage","text":text})
         }}),
     };
     format!("{value}\n")
@@ -69,7 +75,7 @@ fn codex_extracts_dialogue_tools_and_last_completed_command() {
 
 #[test]
 fn resumes_at_byte_offset_and_leaves_partial_last_line_for_next_read() {
-    for agent in [Agent::Claude, Agent::Codex] {
+    for agent in [Agent::Claude, Agent::Codex, Agent::Canter] {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let prefix = "unparsed earlier line 中文\n";
@@ -93,7 +99,7 @@ fn resumes_at_byte_offset_and_leaves_partial_last_line_for_next_read() {
 
 #[test]
 fn resumes_after_a_consumed_final_json_gets_its_newline() {
-    for agent in [Agent::Claude, Agent::Codex] {
+    for agent in [Agent::Claude, Agent::Codex, Agent::Canter] {
         for separator in ["\n", "\r\n"] {
             let dir = TempDir::new().unwrap();
             let path = dir.path().join("transcript.jsonl");
@@ -114,7 +120,7 @@ fn resumes_after_a_consumed_final_json_gets_its_newline() {
 
 #[test]
 fn blank_record_at_normal_resume_boundary_or_after_late_separator_still_errors() {
-    for agent in [Agent::Claude, Agent::Codex] {
+    for agent in [Agent::Claude, Agent::Codex, Agent::Canter] {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let first = message(agent, "user", "问题");
@@ -134,7 +140,7 @@ fn blank_record_at_normal_resume_boundary_or_after_late_separator_still_errors()
 
 #[test]
 fn shorter_file_restarts_but_equal_length_does_not_replay_old_dialogue() {
-    for agent in [Agent::Claude, Agent::Codex] {
+    for agent in [Agent::Claude, Agent::Codex, Agent::Canter] {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let input = message(agent, "user", "重写后");
@@ -152,7 +158,7 @@ fn shorter_file_restarts_but_equal_length_does_not_replay_old_dialogue() {
 
 #[test]
 fn rejects_non_regular_file_and_reports_io_without_paths() {
-    for agent in [Agent::Claude, Agent::Codex] {
+    for agent in [Agent::Claude, Agent::Codex, Agent::Canter] {
         let dir = TempDir::new().unwrap();
         assert!(matches!(
             extract(agent, dir.path(), 0),
@@ -166,7 +172,7 @@ fn rejects_non_regular_file_and_reports_io_without_paths() {
 
 #[test]
 fn invalid_middle_line_is_an_error_but_invalid_last_line_is_left_unread() {
-    for agent in [Agent::Claude, Agent::Codex] {
+    for agent in [Agent::Claude, Agent::Codex, Agent::Canter] {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let first = message(agent, "user", "完整问题");
@@ -190,7 +196,11 @@ fn invalid_middle_line_is_an_error_but_invalid_last_line_is_left_unread() {
 
 #[test]
 fn unknown_rows_advance_offset_but_tools_and_empty_messages_are_not_dialogue() {
-    for (agent, fixture) in [(Agent::Claude, CLAUDE), (Agent::Codex, CODEX)] {
+    for (agent, fixture) in [
+        (Agent::Claude, CLAUDE),
+        (Agent::Codex, CODEX),
+        (Agent::Canter, CANTER),
+    ] {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("transcript.jsonl");
         let unknown = "{\"type\":\"future_record\",\"text\":\"ignored\"}\n";
@@ -251,6 +261,7 @@ fn tool_arguments_and_results_are_limited_to_500_unicode_characters() {
                         "type":"custom_tool_call_output","call_id":"t","output":body
                     }}),
                 ),
+                Agent::Canter => unreachable!("canter has no public tool records"),
             };
             let input = format!("{}{call}\n{result}\n", message(agent, "user", &body));
             fs::write(&path, input).unwrap();
@@ -271,8 +282,20 @@ fn tool_arguments_and_results_are_limited_to_500_unicode_characters() {
 }
 
 #[test]
+fn canter_reads_only_public_completed_messages_and_marks_interrupted_replies() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("events.jsonl");
+    fs::write(&path, CANTER).unwrap();
+    let excerpt = extract(Agent::Canter, &path, 0).unwrap();
+    assert_eq!(excerpt.text, "user: 检查合成文件\n继续检查\nassistant: 开始检查\nassistant: 检查完成\nassistant（没说完）: 还有一部\n");
+    assert_eq!(excerpt.tools_cut, 0);
+    assert_eq!(excerpt.end_offset, CANTER.len() as u64);
+    assert_eq!(fs::read_to_string(path).unwrap(), CANTER);
+}
+
+#[test]
 fn excerpt_caps_utf8_bytes_and_keeps_one_quarter_head_three_quarters_tail() {
-    for agent in [Agent::Claude, Agent::Codex] {
+    for agent in [Agent::Claude, Agent::Codex, Agent::Canter] {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("transcript.jsonl");
         for body in [

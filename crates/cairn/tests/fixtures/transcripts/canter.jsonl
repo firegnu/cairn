@@ -1,0 +1,15 @@
+{"type":"turn.started","seq":1,"sessionId":"synthetic-canter-session","timestamp":1794358800000,"turn":{"id":"turn-1"}}
+{"type":"item.completed","seq":2,"sessionId":"synthetic-canter-session","timestamp":1794358800001,"turnId":"turn-1","item":{"id":"user-1","type":"userMessage","content":[{"type":"text","text":"检查合成文件"},{"type":"image","text":"忽略图片"},{"type":"text","text":"继续检查"}]}}
+{"type":"item.started","seq":3,"sessionId":"synthetic-canter-session","timestamp":1794358800002,"turnId":"turn-1","item":{"id":"reply-1","type":"agentMessage","text":"忽略开始"}}
+{"type":"item.delta","seq":4,"sessionId":"synthetic-canter-session","timestamp":1794358800003,"turnId":"turn-1","item":{"id":"reply-1","type":"agentMessage","text":"忽略增量"}}
+{"type":"item.completed","seq":5,"sessionId":"synthetic-canter-session","timestamp":1794358800004,"turnId":"turn-1","item":{"id":"reply-1","type":"agentMessage","text":"开始检查"}}
+{"type":"item.completed","seq":6,"sessionId":"synthetic-canter-session","timestamp":1794358800005,"turnId":"turn-1","item":{"id":"unknown-1","type":"unknownTool","text":"忽略工具"}}
+{"type":"item.completed","seq":7,"sessionId":"synthetic-canter-session","timestamp":1794358800006,"turnId":"turn-1","item":{"id":"context-1","type":"hookContext","event":"SessionStart","charCount":100}}
+{"type":"item.completed","seq":8,"sessionId":"synthetic-canter-session","timestamp":1794358800007,"turnId":"turn-1","item":{"id":"reply-2","type":"agentMessage","status":"completed","text":"检查完成"}}
+{"type":"item.completed","seq":9,"sessionId":"synthetic-canter-session","timestamp":1794358800008,"turnId":"turn-1","item":{"id":"reply-3","type":"agentMessage","status":"interrupted","text":"还有一部"}}
+{"type":"item.completed","seq":10,"sessionId":"synthetic-canter-session","timestamp":1794358800009,"turnId":"turn-1","item":{"id":"reply-4","type":"agentMessage","status":"future","text":"忽略状态"}}
+{"type":"item.completed","seq":11,"sessionId":"synthetic-canter-session","timestamp":1794358800010,"turnId":"turn-1","item":{"id":"reply-5","type":"agentMessage","status":null,"text":"忽略非法状态"}}
+{"type":"item.completed","seq":12,"sessionId":"synthetic-canter-session","timestamp":1794358800011,"turnId":"turn-1","item":{"id":"user-2","type":"userMessage","content":"忽略非公开的字符串结构"}}
+{"type":"turn.completed","seq":13,"sessionId":"synthetic-canter-session","timestamp":1794358800012,"turn":{"id":"turn-1","items":[{"type":"agentMessage","text":"忽略副本"}]}}
+{"type":"session.rewound","seq":14,"sessionId":"synthetic-canter-session","timestamp":1794358800013,"rewindConversation":true,"beforeTurnId":"turn-1","record":{"id":"rewind-1"}}
+{"type":"turn.retracted","seq":15,"sessionId":"synthetic-canter-session","timestamp":1794358800014,"turnId":"turn-1"}

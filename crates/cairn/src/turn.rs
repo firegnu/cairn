@@ -10,6 +10,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 pub enum Agent {
     Claude,
     Codex,
+    Canter,
 }
 
 impl Agent {
@@ -17,6 +18,7 @@ impl Agent {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Canter => "canter",
         }
     }
 }

@@ -12,6 +12,7 @@ pub(crate) struct Paths {
     pub stable: PathBuf,
     pub claude: PathBuf,
     pub codex: PathBuf,
+    pub canter: PathBuf,
 }
 impl Paths {
     pub fn from_env() -> Result<Self> {
@@ -20,13 +21,23 @@ impl Paths {
             stable: stable_path()?,
             claude: dir("CLAUDE_CONFIG_DIR", home.join(".claude"))?.join("settings.json"),
             codex: dir("CODEX_HOME", home.join(".codex"))?.join("hooks.json"),
+            canter: std::env::var_os("CANTER_HOME")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".canter"))
+                .join("config.json"),
         })
     }
-    pub fn config(&self, agent: Agent) -> &Path {
-        match agent {
+    pub fn config(&self, agent: Agent) -> Result<&Path> {
+        let path = match agent {
             Agent::Claude => &self.claude,
             Agent::Codex => &self.codex,
+            Agent::Canter => &self.canter,
+        };
+        if !path.is_absolute() {
+            return Err("CANTER_HOME 必须是绝对路径".into());
         }
+        Ok(path)
     }
     pub fn command(&self, agent: Agent) -> Result<String> {
         Ok(format!(
@@ -70,6 +81,7 @@ fn name(agent: Agent) -> &'static str {
     match agent {
         Agent::Claude => "claude",
         Agent::Codex => "codex",
+        Agent::Canter => "canter",
     }
 }
 pub(crate) fn own_command(command: &str, agent: Agent) -> bool {
@@ -204,7 +216,7 @@ fn merge(raw: &str, paths: &Paths, agent: Agent, uninstall: bool) -> Result<Stri
                 }
             } else {
                 let mut handler = json!({"type":"command", "command":command});
-                if event == "SessionEnd" {
+                if event == "SessionEnd" && !matches!(agent, Agent::Canter) {
                     handler["timeout"] = json!(if matches!(agent, Agent::Codex) { 3 } else { 1 });
                 }
                 if event == "SessionStart" && matches!(agent, Agent::Codex) {
@@ -256,7 +268,10 @@ pub(crate) fn run(
     input: &mut impl Read,
 ) -> Result<String> {
     let paths = Paths::from_env()?;
-    let path = paths.config(agent);
+    let path = paths.config(agent)?;
+    if matches!(agent, Agent::Canter) && !path.parent().unwrap().is_dir() {
+        return Err("canter 配置目录不存在；请先配置 canter".into());
+    }
     let before = read_config(path)?;
     let after = merge(
         before.as_deref().unwrap_or("{}\n"),
@@ -318,7 +333,9 @@ pub(crate) fn run(
     }
     let mut result = String::new();
     if config_changed {
-        fs::create_dir_all(path.parent().unwrap())?;
+        if !matches!(agent, Agent::Canter) {
+            fs::create_dir_all(path.parent().unwrap())?;
+        }
         if let Some(before) = &before {
             let backup = backup(path, before)?;
             result.push_str(&format!("备份：{}\n", backup.display()));

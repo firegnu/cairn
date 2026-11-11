@@ -11,8 +11,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 fn agent_status(paths: &Paths, agent: Agent) -> Result<Value> {
-    let raw = crate::install::read_config(paths.config(agent))?;
-    let config: Value = serde_json::from_str(raw.as_deref().unwrap_or("{}"))?;
+    let path = paths.config(agent)?;
+    let raw = crate::install::read_config(path)?;
+    let raw = raw.as_deref().unwrap_or("{}");
+    let config: Value = if matches!(agent, Agent::Canter) {
+        crate::install_json::parse(raw)?
+    } else {
+        serde_json::from_str(raw)?
+    };
     if !config.is_object() {
         return Err("配置必须是 JSON 对象".into());
     }
@@ -48,7 +54,7 @@ fn agent_status(paths: &Paths, agent: Agent) -> Result<Value> {
                     .is_ok_and(|p| allow.contains(&Value::String(p)))
             });
     Ok(
-        json!({"config_path": paths.config(agent), "installed": hooks_present && permission,
+        json!({"config_path": path, "installed": hooks_present && permission,
         "events": events, "commands_use_stable_path": hooks_present && commands_use_stable_path, "save_permission": permission}),
     )
 }
@@ -87,6 +93,11 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
                 .unwrap_or_else(|e| json!({"installed":false,"error":e.to_string()})),
         );
     }
+    agents.insert(
+        "canter".into(),
+        agent_status(&paths, Agent::Canter)
+            .unwrap_or_else(|_| json!({"installed":false,"commands_use_stable_path":false})),
+    );
     let scope = crate::scope::Git::default().resolve(cwd)?;
     let store =
         crate::store::Store::open_read_only(database, crate::store::BusyTimeout::UserCommand)?;
@@ -162,7 +173,7 @@ pub(crate) fn run(cwd: &Path, database: &Path, root: &Path, as_json: bool) -> Re
         return Ok(serde_json::to_string_pretty(&report)?);
     }
     let mut text = String::new();
-    for name in ["claude", "codex"] {
+    for name in ["claude", "codex", "canter"] {
         let a = &report["agents"][name];
         text.push_str(&format!(
             "{name}: {}；命令指向稳定路径：{}\n",
