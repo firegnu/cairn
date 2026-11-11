@@ -2,6 +2,7 @@
 
 2026-11-11，cairn/main 交给 cairn/dev-canter（Codex，碰要害：gpt-6-astra / xhigh）。
 路由：碰要害 / 交叉审查要 / 影响面：碰要害（路由：重（置信 0.8）、要（数据模型 0.99）、碰要害）
+交叉审查：用户 11-11 定换成 Codex（「审查换成 Codex」），不用读表默认的 Claude。
 类型：功能变更
 依据：本轮实现 canter 的 hook 适配、会话记录解析器、install/uninstall、status 一项和数据库版本 6；不改 Claude、Codex 的行为，不做真实 canter 实测，不升版本号、不装到真实环境。
 提示：围绕已确认的使用目标完成变更，优先沿用现有机制。
