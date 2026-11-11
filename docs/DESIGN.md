@@ -14,6 +14,8 @@
 
 **2026-10-16 修订（经验沉淀，P1-19）**：在项目的账里加第四类条目“经验”（`lesson`）：做过才知道的做法和教训。和记账同一次调用一起记，不加表、不升表结构，注入里单独成一节，从会话摘要那份匀出约 1,500 字符。改动处标了"2026-10-16 经验"，在 §1、D2、新增 D15、§6.2、§7、§7.1、§8.9、§9.1、§9.5、§9.6、§13、§14、§15。逐条的决定（E1–E14）和验收六条见[经验沉淀设计草案](经验沉淀设计草案.md)。**还没实现**。
 
+**2026-11-11 修订（接入 canter，P1-27）**：canter 成为第三家 agent，和 Claude Code、Codex 一样开局注入、发话时补注入、会后写摘要和记账（用户转述：「其实就是canter接入cairn之后就是和现在接入cairn的codex和claude code对齐了呗」）。canter 是可选的：机器上没有 canter 不影响另外两家（「cairn是一个独立的记忆服务。不能因为机器上没有canter就失败」）；只照 canter 的公开接口接，canter 不为 cairn 写特例。用户 11-11 定：canter 子会话的事件不处理；canter 的会话记录只读公开约定里的行（不读工具输出）；断线重连那次的 SessionStart 分不出来，先接着、列为限制（R28），另写需求交 canter。改动处标了"2026-11-11 canter"，在 §1、D10、新增 D16、§3、§4、§5、§6.2 版本 6、§7、§7.1、§8.8、新增 §10.5、§10.3、§12、§13、§14、§15。需求和经过见 `docs/任务/P1-27-接入canter.md`。**还没实现**。
+
 背景、讨论过程和被否决的方案见[背景与决策记录](背景与决策记录.md)；agent hooks 的官方资料摘录见[调研/agent-hooks资料](调研/agent-hooks资料.md)。
 
 ## 1. 是什么
@@ -39,7 +41,7 @@ cairn 是给终端里的 coding agent 用的**工作接续记忆工具**。名�
 首版的范围：
 
 - 用户只有作者本人，只用一台机器。
-- 只支持 Claude Code 和 Codex。
+- 只支持 Claude Code 和 Codex。2026-11-11 canter：加上 canter（D16、§10.5），可选，没有它不影响另外两家。
 - 核心与具体 agent 无关，接入新 agent 只需要加一个适配器（§4）。
 
 ## 2. 已定决定
@@ -55,12 +57,13 @@ cairn 是给终端里的 coding agent 用的**工作接续记忆工具**。名�
 | D7 | 记录是带来源的历史，不是当前指令，也不是授权。"用户原话"一栏是模型写的：旁路模型从会话记录里摘录，可能断章；`cairn save` 写的是转述，可能有误 | 共同建议；2026-10-13 补“摘录” |
 | D8 | 缺口只报告观测到的事实：最后一次落盘之后的情况算未知。不推断崩溃，也不说"丢了 N 轮" | 共同建议 |
 | D9 | 同一条工作线上，各来源最新的记录有界并列显示，不按时间互相覆盖。显式取代只能点名具体 ID，可以追溯，也可以撤销。同一个来源再写一条，新的顶替它自己的上一条（版本，§8.8） | 共同建议；“版本”一句用户 2026-10-13 |
-| D10 | 核心与 agent 无关，每种 agent 一个薄适配器。首版只接 Claude Code 和 Codex，不承诺所有 agent 都全自动，也不承诺任何环境都不用配置 | 共同建议 |
+| D10 | 核心与 agent 无关，每种 agent 一个薄适配器。首版只接 Claude Code 和 Codex，不承诺所有 agent 都全自动，也不承诺任何环境都不用配置。2026-11-11 canter：第三家接 canter（D16） | 共同建议；canter 用户 2026-11-11 |
 | D11 | 第一阶段能力实测是实现门槛。写入传输必须两种工具都能用、不污染回答、不扩大沙箱；哪种工具做不到，就向用户报告这个限制，不悄悄降级。旁路摘要这条路的门槛是 P1-04、P1-05 两次实测（2026-10-13 加） | 共同建议 |
 | D12 | 为写摘要，读已采用项目里的会话记录（transcript）：只读 hook 给出的那一个文件，原文不入库（§12）。不读其他工具的记忆库，不读 Corral 的事件文件。不自动提交、推送或 fetch。cairn 自己不连网，但会调起要联网的 `codex exec`，会话内容的摘录因此会交给 Codex，Claude Code 的会话也是 | 用户 2026-10-12、10-13（原为共同建议：不读会话记录，不连网） |
 | D13 | 项目的账（长期记忆，2026-10-15 账）：和会话摘要分开存。按项目一本，所有工作线、两家 agent 共用；一条一件事，分现状、悬而未决、约定三类，只有有效、已了结两种状态，每笔变动留历史和依据。旁路模型在会话之后单独调一次 Codex 自动维护，直接生效，不设确认；开局注入有效条目；用户用 `cairn ledger` 查看、纠正、导出。目标是替代 HANDOFF；现有的 HANDOFF 由 agent 读、和用户一起规整后用命令写进去，不做导入命令 | 用户 2026-10-15（长期记忆设计草案 §1.1 L1–L12） |
 | D14 | 记忆的范围（2026-10-16）：cairn 只管项目里的记忆：会话记忆（会话摘要）、长期记忆（项目的账，D13）、经验沉淀（以后做）。全局记忆就是各工具自己的全局指令文件（如 `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`），由用户自己写，保持现状；cairn 不读、不写、不同步它们，也不为它们提供接口。在 paddock 里显示、编辑各 agent 的全局设定是 paddock 的事 | 用户 2026-10-16（“全局记忆就现在这个样子”“cairn从此只管项目记忆（短期记忆，长期记忆，经验沉淀）”） |
 | D15 | 经验沉淀（2026-10-16 经验）：记做过才知道的做法和教训（试了失败换个法子成了；工具的行为和预想的不一样；用户纠正了做法），只管本项目。存在账的表里做第四类 `lesson`，和账共用编号、状态、历史、依据和 `cairn ledger` 命令；不加表、不升表结构。由旁路模型在记账那一次调用里一起记，直接生效，不设确认；一批里经验的变动最多 5 笔，和账的 10 笔分开算、分开检查：经验那组不合格只丢经验，账照常写；账那组不合格照旧整批丢（§8.9）。要求里让模型一次最多记 3 条最值得留的，5 笔只是防失控的硬上限。开局在“项目的账”之后单独一节“经验”，约 1,500 字符，从会话摘要那份里匀出，总量约 9,000 不变。先不做检索、按需查和跨项目的经验 | 用户 2026-10-16（经验沉淀设计草案 §1.1 E1–E14） |
+| D16 | 接入 canter（2026-11-11 canter）：canter 是第三家 agent，开局注入、发话时补注入、会后写摘要和记账、`status`/`list` 里的来源都和另外两家一样。可选：没装 canter、没有它的配置目录、它的服务端没在跑、版本太旧，都不影响另外两家，不报错，`status` 照实报没装。只照 canter 公开的钩子接口和会话记录约定接（canter 仓库 `docs/DESIGN.md`「钩子（P2-153）」「会话记录的公开读取约定（P2-281）」），canter 不为 cairn 写特例；需要 canter 改的写成需求交用户。不读 canter 状态目录里 `config.json` 和钩子给的 `transcript_path` 以外的文件。子会话（stdin 带 `agent_id`）的事件不处理；会话记录只读公开约定里的行，不读工具输出（§10.5） | 用户 2026-11-11（经 canter 主控转述；子会话、工具输出、重连三件 11-11 当面定） |
 
 "共同建议"指 Saddle 仓库 T49 讨论中，主控与 Claude 达成并经复核的方案（Saddle 分支 `t49-memory-design`，提交 `3afc47c`）。它原来主张"放在 Saddle 同仓"，D1 已改为独立仓库。用户随后在 2026-10-05 指示：按这套方案建立 cairn 仓库，由新主控开工。主控如果认为某一条需要用户再确认，列出来问用户，不要自行改动。
 
@@ -71,7 +74,7 @@ cairn 是给终端里的 coding agent 用的**工作接续记忆工具**。名�
 | 项目 | 一个 Git 仓库，所有 worktree 共用。键是 Git 公共目录的规范绝对路径；不在 Git 里的目录用当前目录的规范路径 |
 | 工作线 | 一个 worktree 的顶层目录（`git rev-parse --show-toplevel` 的规范路径）。分支只是记录上的属性，不是身份 |
 | 来源 | 写入记录的一方。hook 路径下是"agent 种类 + 会话 ID"；CLI 拿不到会话 ID 时，分配一个本地来源 ID，并标为"关联不确定" |
-| 回合 | 一个 agent 从收到一条提示到给出最终回答的过程。由工具提供的字段标识（Claude 用 `prompt_id`，Codex 用 `turn_id`），具体判别以第一阶段实测为准 |
+| 回合 | 一个 agent 从收到一条提示到给出最终回答的过程。由工具提供的字段标识（Claude 用 `prompt_id`，Codex 用 `turn_id`），具体判别以第一阶段实测为准。2026-11-11 canter：canter 不给回合标识，这一项空着；2026-10-13 起 cairn 不靠它判定任何事，只在 `turn_started` 事件里当备注存（§8.3） |
 | 记录 | 一条接续记录：程序采集的事实加模型写的正文。由旁路模型写（摘要），或由 `cairn save` 写。写入后不再修改 |
 | 会话记录 | 工具自己写在磁盘上的对话文件（transcript），一行一条 JSON。路径由 hook 输入里的 `transcript_path` 给出 |
 | 旁路模型 | cairn 为写摘要调起的一次性命令（`codex exec`）。它不是会话里的 agent，写完就退出 |
@@ -90,7 +93,7 @@ cairn 是给终端里的 coding agent 用的**工作接续记忆工具**。名�
 ## 4. 架构
 
 ```text
-agent（Claude Code / Codex）──自己把对话写进会话记录文件（磁盘）
+agent（Claude Code / Codex / canter）──自己把对话写进会话记录文件（磁盘）
   │ hook：stdin 收到官方 JSON（含会话记录的路径）   │ shell 工具：cairn save（自愿；正文走 stdin）
   ▼                                               ▼
 cairn hook <agent> ──适配器翻译成标准事件──►  核心：存储 · 写摘要 · 渲染       cairn save
@@ -111,7 +114,7 @@ cairn hook <agent> ──适配器翻译成标准事件──►  核心：存�
 | 标准事件 | 字段 | 适配器要返回给 agent 的 |
 |---|---|---|
 | SessionStarted | agent、session_id、cwd、start_kind（startup / resume / clear / compact / fork / other）、transcript_path（可能没有） | 注入文本，或者什么都不返回 |
-| TurnStarted | agent、session_id、turn_key、cwd、transcript_path（可能没有） | 什么都不返回 |
+| TurnStarted | agent、session_id、turn_key（可能没有；canter 没有，2026-11-11 canter）、cwd、transcript_path（可能没有） | 什么都不返回 |
 | TurnEnded | agent、session_id、turn_key（可能没有）、cwd、transcript_path（可能没有） | 什么都不返回（2026-10-13 起不再续跑） |
 | SessionEnded | agent、session_id、cwd、reason | 什么都不返回 |
 
@@ -124,12 +127,12 @@ cairn hook <agent> ──适配器翻译成标准事件──►  核心：存�
 - `render`：生成注入文本，控制预算。
 - `protocol`：固定的规则文字。
 - `turn`：回合事件的处理（2026-10-13 起只记事件，不再判定续跑，§8.3）。
-- `transcript::{claude,codex}`：把会话记录抽成文本，每家一个薄的解析器（§8.8）。
+- `transcript::{claude,codex,canter}`：把会话记录抽成文本，每家一个薄的解析器（§8.8；canter 2026-11-11 加）。
 - `sidecar`：挑出该写摘要的会话、调旁路模型、时限和互斥（§8.8）。
 - `ledger`：项目的账：条目的存取、记账的输出检查和写入、`cairn ledger` 命令（§8.9，2026-10-15 账）。
 - `cli`：命令行。
-- `adapters::{claude,codex}`：hook 适配。
-- `install::{claude,codex}`：安装和卸载。
+- `adapters::{claude,codex,canter}`：hook 适配。
+- `install::{claude,codex,canter}`：安装和卸载。
 
 依赖选用成熟、活跃维护的库。候选：`rusqlite`（bundled）、`serde` / `serde_json`、ULID 或 UUID 生成库、参数解析库。Git 信息通过调用 `git` 命令行取得，不引入 libgit2；每次调用都要设超时。
 
@@ -141,7 +144,7 @@ cairn hook <agent> ──适配器翻译成标准事件──►  核心：存�
   - 路径被复用、分支被切换，都不说明是"同一份工作"。
   - 仓库被移动或重建后，不自动猜对应关系。用户需要重新 adopt；旧记录还留在旧键下，可以用命令查看。
 - **来源**：
-  - hook 路径下来源是 `claude:<session_id>`、`codex:<session_id>`。
+  - hook 路径下来源是 `claude:<session_id>`、`codex:<session_id>`、`canter:<session_id>`（2026-11-11 canter）。
   - SessionStart 注入的抬头里写着本会话的来源 ID（§9.2），agent 自愿 `cairn save` 时原样照抄。
   - CLI 不带 `--source`，或者带的来源从来没出现过，就分配 `local:<ULID>`，并标为"关联不确定"。不会出现所有写入者都叫 `unknown` 的情况。
   - save 不读数据库，判断不了"从来没出现过"。所以暂存文件只记"声明的来源"，这条规则在收取事务里执行（§6.5、§8.2）；分配的 `local:` ID 直接用该暂存操作的 `op_id`，重放时结果不变。
@@ -167,7 +170,7 @@ CREATE TABLE projects (
   id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE,                     -- Git 公共目录规范路径
   adopted INTEGER NOT NULL, adopted_at TEXT, unadopted_at TEXT);
 CREATE TABLE sources (
-  id TEXT PRIMARY KEY,                                                  -- claude:<sid> / codex:<sid> / local:<ulid>
+  id TEXT PRIMARY KEY,                                                  -- claude:<sid> / codex:<sid> / canter:<sid> / local:<ulid>
   agent TEXT NOT NULL, session_id TEXT, association TEXT NOT NULL,      -- hook / declared / uncertain
   first_seen TEXT NOT NULL, last_seen TEXT NOT NULL);
 CREATE TABLE records (
@@ -218,7 +221,7 @@ CREATE TABLE spool_ops (                                                -- 已�
 ```sql
 CREATE TABLE hook_seen (                                                -- 每个 (项目, agent, 事件) 只留一行
   project_id INTEGER NOT NULL REFERENCES projects(id),
-  agent TEXT NOT NULL,                                                  -- claude / codex
+  agent TEXT NOT NULL,                                                  -- claude / codex / canter（canter 2026-11-11，版本 6）
   event TEXT NOT NULL,                                                  -- SessionStart / UserPromptSubmit / Stop / SessionEnd（agent 自己的事件名）
   at TEXT NOT NULL,                                                     -- 最近一次，RFC 3339 UTC 毫秒
   PRIMARY KEY (project_id, agent, event));
@@ -321,6 +324,12 @@ CREATE INDEX ledger_runs_project ON ledger_runs(project_id, id);
 - 删除项目的账条目（`cairn ledger delete`）不碰这张表：表里没有条目内容。
 - 升级照版本 2～4 的办法。只读的一方（`status`、`ledger runs`）遇到版本 4 的库，要自己看这张表在不在，不在就当作没有记录。0.6.x 遇到版本 5 的库会按“版本更新”拒绝，退回要连库换回装前的备份。
 
+**版本 6（接入 canter，2026-11-11 canter，草案，实现任务定稿）**：`hook_seen.agent` 多认一个 `canter`。只动这一张表，别的表和数据不动。
+
+- 为什么要升：实际建表时 `hook_seen.agent` 带了 `CHECK (agent IN ('claude', 'codex'))`（上面的 SQL 没写出来），记不进 canter。别的表的 `agent`、来源 ID 都是普通文本，没有约束。
+- 怎么升：SQLite 改不了已有的 CHECK，在升级的立即事务里重建这张表：建新表（约束改成 `IN ('claude', 'codex', 'canter')`），原样拷入旧行，删旧表，改名。行数很少（项目数 × 家数 × 4）。
+- 升级照版本 2～5 的办法。只读的一方（`status`）遇到版本 5 的库照样读，那时没有 canter 的行，`last_seen` 全是 `null`。0.7.x 遇到版本 6 的库会按“版本更新”拒绝，退回要连库换回装前的备份。
+
 ### 6.3 正文格式
 
 正文是 UTF-8 Markdown，有固定的小标题。程序只检查以下几点，不判断内容对不对：
@@ -394,7 +403,7 @@ CREATE INDEX ledger_runs_project ON ledger_runs(project_id, id);
 ## 7. 命令接口草案
 
 ```text
-cairn hook <claude|codex>                          # 唯一的 hook 入口，按 stdin JSON 里的事件名分派
+cairn hook <claude|codex|canter>                   # 唯一的 hook 入口，按 stdin JSON 里的事件名分派；canter 2026-11-11 加
 cairn save [--source ID] [--nothing-new] [--supersedes ID]...   # agent 可用的写入口，自愿使用；正文走 stdin
 cairn show [--json]                                # 输出和注入相同的内容，给没有 hooks 的工具或人看；不触发写摘要
 cairn summarize                                    # 给当前工作线上该写摘要的会话写摘要（§8.8）
@@ -406,7 +415,7 @@ cairn retract <ID>          # 追加一条失效声明
 cairn restore <ID>          # 撤销对 <ID> 的取代或撤回，追加记录
 cairn delete <ID> [--yes]   # 删除正文只留墓碑；会执行 WAL checkpoint(TRUNCATE)
 cairn export [PATH]         # 输出到 stdout，或写入一个新文件；PATH 已存在则拒绝
-cairn install|uninstall --agent <claude|codex> [--dry-run|--yes]
+cairn install|uninstall --agent <claude|codex|canter> [--dry-run|--yes]   # canter 2026-11-11 加
 cairn status [--json]
 cairn ledger [--all] [--json]                      # 项目的账：有效条目；--all 含已了结（2026-10-15 账，§8.9）
 cairn ledger show <#no|ID> [--json]                # 一条和它的历史
@@ -435,7 +444,8 @@ paddock（GPUI 桌面前端）的 Cairn 面板调用下面这些命令。这里�
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `agents.claude.installed`、`agents.codex.installed` | 布尔 | 这家 agent 的四个 hook 都已写进它的用户级配置（Claude 还要有放行 `save` 的规则）。只看配置文件，不代表 hook 真的会触发（Codex 的信任状态读不到） |
-| `agents.<名字>.last_seen` | 对象 | 四个键 `SessionStart`、`UserPromptSubmit`、`Stop`、`SessionEnd`，值是这家 agent 的这种 hook 在**当前项目**里最近一次被 cairn 处理的时间（RFC 3339 UTC 毫秒，如 `2026-10-10T08:50:43.687Z`），没有记录是 `null`。四个键总在。记法和限制见 §8.7。0.1.0 没有这个字段，调用方把缺字段当作"不知道" |
+| `agents.canter.installed` | 布尔 | 2026-11-11 canter 加，含义同上：四个 hook 都已写进 canter 的全局配置（§10.5）。没装 canter、没有它的配置目录或配置文件、配置读不了，都是 `false`，不报错、不影响别的字段。只看配置文件，不代表 hook 真的会触发（canter 在没信任的目录里不跑钩子，cairn 读不到）。旧版 cairn 没有这一项，调用方把缺字段当作“不知道” |
+| `agents.<名字>.last_seen` | 对象 | 四个键 `SessionStart`、`UserPromptSubmit`、`Stop`、`SessionEnd`，值是这家 agent 的这种 hook 在**当前项目**里最近一次被 cairn 处理的时间（RFC 3339 UTC 毫秒，如 `2026-10-10T08:50:43.687Z`），没有记录是 `null`。四个键总在。记法和限制见 §8.7。0.1.0 没有这个字段，调用方把缺字段当作"不知道"；`agents.canter.last_seen` 同样四个键（2026-11-11 canter） |
 | `project.status` | 字符串 | `adopted`（已采用）、`not_adopted`（有数据库、这个项目没采用）、`no_data`（还没有数据库） |
 | `spool.pending_json` | 非负整数 | 暂存区里还没收取的保存操作数 |
 
@@ -467,7 +477,7 @@ paddock（GPUI 桌面前端）的 Cairn 面板调用下面这些命令。这里�
 | --- | --- | --- |
 | `id` | 字符串 | 记录编号 |
 | `created_at` | 字符串 | 保存时间（运行 `save` 的时间，不是收取时间），RFC 3339 UTC 毫秒，如 `2026-10-10T08:50:43.687Z` |
-| `agent` | 字符串 | `claude`、`codex`，或 `local`（不属于哪一家的 hook 会话：`save` 没声明来源或声明的来源没出现过，以及用户命令写的更正、撤回、恢复）。以后可能有新值 |
+| `agent` | 字符串 | `claude`、`codex`、`canter`（2026-11-11 canter），或 `local`（不属于哪一家的 hook 会话：`save` 没声明来源或声明的来源没出现过，以及用户命令写的更正、撤回、恢复）。以后可能有新值 |
 | `session_id` | 字符串或 `null` | 那家 agent 的会话编号；`agent` 是 `local` 时为 `null` |
 | `source_id` | 字符串 | 来源：`<agent>:<session_id>`，或 `local:<编号>` |
 | `line_path` | 字符串 | 工作线（worktree 根目录的绝对路径） |
@@ -511,7 +521,7 @@ paddock（GPUI 桌面前端）的 Cairn 面板调用下面这些命令。这里�
 | `body` | 字符串或 `null` | 正文；没有或已删除为 `null` |
 | `status` | 字符串 | `active`、`closed` |
 | `created_at`、`updated_at` | 字符串 | RFC 3339 UTC 毫秒 |
-| `created_by` | 字符串 | 来源 ID（`claude:…`、`codex:…`），或 `user` |
+| `created_by` | 字符串 | 来源 ID（`claude:…`、`codex:…`、`canter:…`），或 `user` |
 | `closed_at`、`close_reason` | 字符串或 `null` | 了结的时间和理由；没了结为 `null` |
 | `deleted_at` | 字符串或 `null` | 已删除的时间；没删除为 `null` |
 
@@ -659,6 +669,14 @@ save 进程里：
 
 - 路径只用 `sessions.transcript_path`，也就是 hook 输入里给的那一个；不去列、不去翻工具的目录。打开前核对它是普通文件、属主是当前用户。
 - 每家一个薄的解析器，把文件抽成几种行的文本：用户说的话、助手说的话、调了哪个工具和参数、工具的结果。大段的参数和结果截短（建议每段 500 字符）。Codex 一侧要把 `event_msg` 里的 `item_completed` 也算进去：回合中途被杀时，最后一步的输出只在这一类行里（P1-05）。
+- canter（2026-11-11 canter）：只读 canter 公开约定里的行（canter `docs/DESIGN.md`「会话记录的公开读取约定（P2-281）」），不读工具调用、工具结果、思考等不在约定里的行（用户 11-11 定），所以 canter 会话的摘录里只有用户和助手的话，工具那两种行没有、`tools_cut` 总是 0。读法：
+  - 用户的话：`type: "item.completed"`、`item.type: "userMessage"` 的行，取 `item.content` 里 `type: "text"` 的 `text`，按顺序以换行连接。
+  - 助手的话：`type: "item.completed"`、`item.type: "agentMessage"` 的行，取 `item.text`；`item.status` 缺省或 `completed` 照常读，`interrupted` 标成“没说完”照读，别的状态跳过。不读 `item.started`、`item.delta`、`turn.completed` 里的副本。
+  - 轮的先后按 `turn.started` 的 `turn.id`；每条消息归它的 `turnId`。
+  - 回退和撤回是后加的行，原消息行还在，要先去掉：`session.rewound` 且 `rewindConversation: true` 去掉 `beforeTurnId` 那一轮及之后的轮；`turn.retracted` 去掉 `turnId` 那一轮。所以 canter 的解析器每次都从文件开头读到当前长度，得出当前有效的对话，再按上次读到的字节位置切出“新增部分”：位置在它之后、仍然有效的消息。读到的字节数照旧记到最后一个完整行的末尾。
+  - 写摘要：新增部分里有回退、撤回去掉了上次读到的位置之前的轮（那几轮可能已写进上一版摘要），这一次不给上一版，按“没有上一版”用当前有效的全文重写。去掉之后整个会话一条有效的话都不剩，按“没什么可写”处理，上一版照旧留着（R29）。
+  - 记账：只给新增部分里有效的消息。被去掉的轮之前已经记进账的，不自动撤（R29）。
+  - 下面“解析不了”那条按文件里出现过的消息算：一条用户或助手的话都没有，才算解析不了，这样解析器跟不上格式变化时照样报出来；有过、但全被回退或撤回去掉了，算“没什么可写”。
 - 不认识的行跳过。文件的最后一行不是完整的 JSON 就丢掉这一行。其余某一行解析不了，或者抽不出任何用户或助手的话，算解析不了：不写摘要，记原因。
 - 例外（2026-10-16，账里 #26，用户：“派吧”）：从已读到的位置往后读（读到的字节数大于 0、文件没被重写）时，新增的这一段里没有用户或助手的话，算“没什么可写”，不算没写成：不调旁路模型，读到的字节数前移到这段末尾，不计失败；会话摘要（`summarized_bytes`）和记账（`ledger_bytes`）一样。从头读（第一次读，或文件被重写过）时抽不出对话，仍按上一条算解析不了：这样解析器跟不上格式变化时照样报出来，不会被当成没什么可写悄悄跳过。例子：会话写完摘要之后只追加了几行元数据就结束（claude:2d674b08），以前每次开局都挂一行“记账没写成”。
 - 交给旁路模型的内容：这个来源已有可见的记录时，是"上一版正文，加上会话记录里 `summarized_bytes` 之后的新增部分"；上一版是 `cairn save` 写的也一样当作输入。没有上一版、或者文件比 `summarized_bytes` 还小（被重写过），就用全文。
@@ -953,7 +971,7 @@ save 进程里：
 
 - **命令路径要稳定**：命令指向固定路径 `${XDG_DATA_HOME:-$HOME/.local/share}/cairn/bin/cairn`，这是一个指向实际二进制的软链接。第一阶段 E 用内容不同的 debug/release 二进制验证了只换软链接目标、保持 hook 定义文本不变时，Codex 的已有信任仍有效。
 - **安装流程**：`install` 先展示要改的内容（`--dry-run`），征得确认（交互确认或 `--yes`），改之前先备份，只合并 cairn 自己的条目，不动其他 hook。`uninstall` 只删 cairn 自己的条目。
-- **`status` 报告**：各 agent 是否已安装、命令路径是否有效、当前目录所在项目是否已采用；Codex 还要提醒用户到 `/hooks` 确认信任状态。 2026-10-13 加：`codex` 在不在 PATH 里；当前工作线上还没有摘要的会话有几个（旁路模型判定不用写的不算，2026-10-15），最近一次没写成的原因。
+- **`status` 报告**：各 agent 是否已安装、命令路径是否有效、当前目录所在项目是否已采用；Codex 还要提醒用户到 `/hooks` 确认信任状态。canter（2026-11-11 canter）只报装没装和最近触发时间，没有信任要提醒；没有 canter 照实报没装，不报错（§10.5）。 2026-10-13 加：`codex` 在不在 PATH 里；当前工作线上还没有摘要的会话有几个（旁路模型判定不用写的不算，2026-10-15），最近一次没写成的原因。
 - **2026-10-13、10-15 的修订不改 hook 的定义**：还是那四个事件、同样的命令文本，已安装的不用重装，Codex 的 hook 信任不受影响（定义文本没变）。换上新程序就生效。等待进程由 hook 调起的同一个程序以内部子命令运行，不是新的 hook。
 - **项目的账（2026-10-15 账）改了 Codex 的 hook 定义**：注入预算加到 9,000 字符后，Codex SessionStart handler 的 `additionalContextLimit` 从 6000 改成 12000（P1-14 实测 6000 收不全，见 §9.1）。这是改定义文本：装上时重新运行 `cairn install --agent codex`，用户到 `/hooks` 重新信任；Corral 起的 Codex 带 hook-trust bypass，不受影响。Claude 的定义不变。
 - **与 Corral 共存**：这一条只是事实说明，不改 Corral。
@@ -967,6 +985,29 @@ save 进程里：
 - 没有 hooks 就拿不到会话记录的路径，旁路摘要对它们不起作用（2026-10-13）。只要能执行 shell 命令，就能用 `cairn save`。可以在项目指令文件里写一句"开工先运行 `cairn show`，阶段结束运行 `cairn save`"，但能否做到取决于模型是否遵守。
 - 连 shell 也不能执行的，用户手动运行 `cairn show`，把内容贴给它。
 - 首版不做 MCP 入口。
+
+### 10.5 canter（2026-11-11 canter）
+
+依据：canter 仓库 `docs/DESIGN.md`「钩子（P2-153）」「会话记录的公开读取约定（P2-281）」，主控读的是 `ed7dc5d`（11-11）。只照这两节接，不读 canter 的代码和别的状态文件（D16）。
+
+| 事件 | 读取的字段 | 输出 |
+|---|---|---|
+| SessionStart | `session_id`、`cwd`、`source`（startup / resume）、`transcript_path` | JSON 格式的 `hookSpecificOutput.additionalContext`；canter 只认这个，纯文本不注入 |
+| UserPromptSubmit | `session_id`、`cwd`、`transcript_path`；没有回合标识（§3） | 有要补的摘要或账的变动时输出 JSON 格式的 `hookSpecificOutput.additionalContext`（§9.5），canter 把它放在这条用户输入前面；否则不输出。不读 `prompt` |
+| Stop | `session_id`、`cwd`、`transcript_path` | 不输出（不读 `last_assistant_message`）；起等待进程（§8.8） |
+| SessionEnd | `session_id`、`cwd`、`reason`（client_exit / client_request / server_shutdown） | 不输出 |
+
+- `source` 照字面对到 start_kind（§8.1）：startup 完整注入，resume 照 resume 的做法。
+- **子会话**（用户 11-11 定：不算）：stdin 带 `agent_id` 的事件（canter 子会话只会发 UserPromptSubmit，用户直接在子会话里打字时）一律不处理：不记事件、不记 `hook_seen`、不注入、不起进程，退出 0、不输出。子会话不发 SessionStart、Stop、SessionEnd，照普通会话记会多出一个来源，之后给子任务的片段单独写一份摘要，和主会话的并列注入；主会话的会话记录里本来就有派活和收结果的经过。Claude Code 的子 agent 现在也不单独记。
+- StopFailure（轮出错）、Interrupt（被打断）不装、不处理，和另外两家一样：没有 Stop 的轮靠会话安静 3 分钟、会话结束或同一工作线上有新会话开局来写摘要。
+- **断线重连**：客户端离开、canter 发过 SessionEnd 之后重连，canter 再发一次 SessionStart(resume)，这次只通知、丢掉输出；stdin 和打开存盘会话那次分不出来。cairn 照 resume 处理，会把这次的内容记成已注入（R28）。已写需求交用户转 canter，请它让钩子能分辨；canter 加了之后再改这里。
+- **配置位置**：只有全局 `$CANTER_HOME/config.json`，没设 `CANTER_HOME` 就是 `~/.canter/config.json`，取运行 `install`、`status` 时的环境。canter 没有项目级钩子，没有 Codex 那种 hook 信任审核；改了配置下一轮生效，不用重启。
+- **安装**：照 §10.3 通则（先 `--dry-run`、确认才写、先备份、只合并和删 cairn 自己的条目）。canter 配置结构不对会让整份配置作废、退回旧配置，所以别的内容原样保留，解析不了的文件拒绝改动。配置目录不存在：拒绝，给一行原因，不替 canter 建目录。目录在、文件不在：新建一个只有 `hooks` 的文件。四个 hook 都不写 `timeout`，用 canter 的缺省 60 秒：SessionStart 在首次模型请求前最多等到 cairn 退出，cairn 的 hook 本身很快、各步都有时限；关会话和停机时 canter 另有 10 秒的共同上限。命令写稳定路径（§10.3），canter 钩子的 PATH 来自客户端，靠不住。不像 Claude 那样加放行 `save` 的规则，也不碰 canter 的 `rules.json`。
+- **不依赖 canter 在不在**：不调 canter 命令、不连它的服务端、不查它的版本。没装 canter、没有配置目录、服务端没在跑，`status` 照实报没装或 `last_seen` 为空，另外两家照常。装到不认 `hooks` 或不认 `additionalContext` 的旧 canter 上会怎样由 canter 决定，cairn 照 `last_seen` 报（R30）。
+- **环境**：canter 钩子用打开会话的那个客户端的环境，corral 带 `--env CAIRN_DISABLE=1` 开的 canter，钩子里照样看得到，照 §8.1 不处理。受限（没信任）的目录里 canter 不跑任何钩子，cairn 读不到这个状态，`status` 看 `last_seen`。
+- **会话记录**：`transcript_path` 是本会话的 `events.jsonl`，只追加。解析器只读公开约定里的行，并按回退、撤回去掉对应的轮（§8.8）。
+- `cairn save` 在 canter 的模型沙箱里能不能写进暂存区（§6.5），没核对，实测时看（§15）；save 是自愿的，写不了不影响摘要。
+- **实测**：和第一阶段一样，接之前在隔离的 `CANTER_HOME` 里实测（用户 11-11 定：用户在隔离目录里登录一次，测完删目录，不碰真实的 `~/.canter`）：开局注入、发话时补注入真的进了模型；子会话打字不产生新来源；回退之后的摘要；`cairn save`。
 
 ## 11. 缺口与现场对比的措辞
 
@@ -1003,7 +1044,7 @@ save 进程里：
   - 路径只取自 hook 的输入，不去列、不去翻工具的目录；
   - 只在写摘要时读（§8.8），hook 平时只记路径；
   - 原文和抽出来的文本都不入库、不另存文件，只在内存里，经 stdin 交给旁路模型；数据库里只有摘要、路径、计数和读到的字节数。
-- cairn 自己不连网。写摘要时调起 `codex exec`，会话内容的摘录由它发给 Codex 的服务方。Claude Code 会话的内容也这样交给 Codex：只是读本机的文件，不调用 Claude 的模型（用户 2026-10-13 知情并同意）。
+- cairn 自己不连网。写摘要时调起 `codex exec`，会话内容的摘录由它发给 Codex 的服务方。Claude Code 会话的内容也这样交给 Codex：只是读本机的文件，不调用 Claude 的模型（用户 2026-10-13 知情并同意）。canter 的会话同样（2026-11-11 canter）：只读钩子给的那一个 `events.jsonl`，不读 canter 状态目录里别的文件。
 - 摘要里可能带进对话中出现过的敏感内容。给旁路模型的要求里写明不抄密钥（§9.4），这只能减轻；误存的用 `cairn delete` 处理。
 - 项目的账（2026-10-15 账）同样：记账也把会话摘录交给 Codex（每个会话多一次）；条目和依据里可能带进敏感内容，要求里写明不抄密钥（§9.6），误存的用 `cairn ledger delete` 处理，它连历史里的旧内容和依据一起清掉（§6.2 版本 4）。账不进仓库，不自动导出。
 - 数据库和日志文件权限为 0600。
@@ -1016,7 +1057,7 @@ save 进程里：
 
 **做**：
 - 一个 crate 和 CLI；
-- 两种 agent 的 SessionStart、UserPromptSubmit（回合起点）、Stop、SessionEnd hooks，Codex 另接 Interrupt（只记观测）；
+- 两种 agent 的 SessionStart、UserPromptSubmit（回合起点）、Stop、SessionEnd hooks，Codex 另接 Interrupt（只记观测）；2026-11-11 canter：canter 也接这四个（§10.5）；
 - adopt、自愿的 save；
 - 读会话记录、调旁路模型写摘要、版本（§8.8），`cairn summarize`、`cairn config`（2026-10-13 加，取代原来的"回合确认与续跑一次"）；
 - 后台等待进程、用户发话时补注入（§8.8、§9.5，2026-10-15 加）；
@@ -1039,7 +1080,7 @@ save 进程里：
 - 读 Corral 或其他工具的数据；
 - 自动提交、推送、fetch；把记录当授权；
 - 跨机器同步；MCP；
-- 支持 Claude Code 和 Codex 以外的 agent；
+- 支持 Claude Code、Codex、canter 以外的 agent（canter 2026-11-11 加，D16）；
 - 和 Saddle 集成或做界面；
 - 自动修改任何项目的规则或 HANDOFF。
 
@@ -1074,6 +1115,9 @@ save 进程里：
 | R25 | 经验记得太碎、和约定重复，或越积越多只剩标题（2026-10-16 经验） | 一批最多 5 笔；“以后都这样”记成约定；要求里写明合并、了结；注入有自己的预算（§9.1） |
 | R26 | 会话摘要的份额从约 6,000 降到约 4,500，长会话的摘要截得更早（2026-10-16 经验） | 账和经验用不满时余下的给摘要；试用看 |
 | R27 | `ledger_runs` 只追加、不清理，库慢慢变大（2026-10-17） | 一行只有计数和原因，一年约 20 MB；真变大了再加清理 |
+| R28 | canter 断线重连那次的 SessionStart(resume) 只通知、不注入，和打开存盘会话分不出来（2026-11-11 canter）。cairn 照 resume 处理，把这次的摘要、账的版本记成已注入，模型其实没看到；之后发话时的补注入也不再补这些 | 用户 11-11 选：先接着，另写需求交用户转 canter，请它让钩子能分辨；canter 加了再改 §10.5。客户端常关常开时更容易碰到 |
+| R29 | canter 回退、撤回掉的轮可能已写进上一版摘要、记进账（2026-11-11 canter） | 摘要：发现上次读到的位置之前有轮被去掉，就用当前有效的全文重写；全被去掉、一条不剩时上一版照旧留着。账：不自动撤，用户用 `cairn ledger` 改（§8.8） |
+| R30 | canter 的会话摘要和账里看不到跑了什么命令、测试输出：只读公开约定里的行（2026-11-11 canter）；canter 版本太旧时钩子可能不跑或注入不进去 | 用户 11-11 定只读公开的行；试用后嫌不够，再写需求请 canter 把工具调用加进公开约定。旧版 canter 靠 `status` 的 `last_seen` 看出来 |
 
 ## 15. 待定问题
 
@@ -1103,5 +1147,6 @@ save 进程里：
 | 会话记录文件被重写变短：摘要（§8.8）和记账（§8.9）都写了“变短就用全文”，但入口只挑“比上次大”的会话，变短的不会重读；之后长过旧偏移时又从旧偏移读 | 两家的会话记录都只追加，没见过变短；用户定先记下不改（2026-10-15 P1-16 交叉审查）。真碰到了摘要和记账一起改 |
 | 截断（2026-10-17，P1-24）：长会话的摘录超过 60 KiB 时只留头 1/4、尾 3/4，记账进度照样越过中间；工具输出只留前 500 字，派出去的 agent 回复末尾的“踩过的坑”进不了记账。候选：记账分段让模型依次看；工具输出留头尾 | 用户 2026-10-17：先只做记录（§8.9“留痕”），看了 `ledger_runs` 的截断统计再定 |
 | 摘要那一步占位丢了时，失败同样记不上；“摘要正在写”在等待进程只是在等时也显示；会话开着时手动 `summarize` 总被挡，提示把“被占用”和“未采用”并成一句（2026-10-17，P1-24） | 没定；留痕上线后看情况 |
+| canter（2026-11-11 canter）：`cairn save` 在 canter 的模型沙箱里能不能写进暂存区；两种注入是不是真进了模型；重连那次（R28）要等 canter 的回复 | 接之前在隔离的 `CANTER_HOME` 里实测（§10.5）；R28 由 canter 定怎么改 |
 
 第一阶段结论与证据见[能力实测报告](调研/第一阶段能力实测.md) §11、§14。主控已向用户核实：yolo 只用于实测，D11 不变；非交互注入表现是已知限制，不挡阶段 2，不再追查。门槛 A、B、C、F 在两种工具上都满足本次明确的实测范围（报告 §11、§14.4）：F 的补测缺口来自额外的 `--settings` 参数，产品不用这种方式放规则。
