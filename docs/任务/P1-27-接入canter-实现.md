@@ -77,3 +77,8 @@
 - 拿主意的地方：主控途中追加 canter P2-284，按指示 `git merge main` 快进到 `aa6602f`，以更新后的 DESIGN §10.5 和本任务文件实施。通过内部 SessionStart 参数在记录、起等待进程之后跳过渲染，不改变原有公开 SessionStarted 结构和其他两家的调用行为；没有自行修改设计，没有需主控另作决定的事项。
 - 没做的事：没有运行真实 agent、读取真实会话或数据库、改用户配置、安装到真实环境，也没有改 canter 仓库、版本号或 HANDOFF。回退/撤回只跳过标记、不撤销旧内容，工具输出仍不读。真实 canter 实测仍由主控另派；本分支不合并回 main、不推送。
 - 踩过的坑：`adopt` 已会创建空暂存区，最初用“暂存区目录不存在”断言子会话无写入不成立，改为核对空暂存区和相关表保持为空。旁路测试首次把 SQLite 整数字段读作 `u64`，当前 rusqlite 不支持该 `FromSql`，改为 `i64` 后才取得“会话类型不支持”的有效 RED；该编译失败没有计作功能失败证据。
+
+## 主控审查
+
+2026-11-11，cairn/main。看了 `e9f5bef` 的 diff：只动了 hook、install、status、session、sidecar、transcript、store 和测试，“不要做”一条没碰；“怎么算做完”六条逐条对上。核对了两处要害：重连那次在写 `injections`、`ledger_injected_version` 之前返回；`status` 的 `last_seen` 三家都补齐。重跑 `cargo test --all-targets` 220 项通过、clippy 无警告，和完成记录一致。交叉审查（Codex，用户定）结论“可以合并”，必须改 0 条，另做了迁移中途失败的回滚实验，见 `P1-27-接入canter-交叉审查.md`。真实 canter 实测还没做，另派。
+结果：一次过
