@@ -1301,7 +1301,7 @@ fn json_contract_list_empty_limit_arguments_and_errors() {
         Cli::try_parse_from(["cairn", "--version"])
             .unwrap_err()
             .to_string(),
-        "cairn 0.7.1\n"
+        "cairn 0.8.0\n"
     );
     let empty = serde_json::json!({"total": 0, "records": []});
     assert_eq!(f.list_json(&[]), empty);
