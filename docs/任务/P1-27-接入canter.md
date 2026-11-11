@@ -94,6 +94,8 @@ canter 回退、撤回是在文件后面追加一行，原来的消息行还在�
 - 写摘要：发现上次已写进摘要的轮被去掉了，就不给上一版，用当前有效的全文重写。
 - 记账：只给新增部分里有效的轮。被撤掉的那几轮之前已经记进账的，不自动撤，写进 DESIGN §14；用户发现了用 `cairn ledger` 改。
 
+11-11 后续：canter 主控照这份需求做了 P2-284（canter `93735ad`），SessionStart 的 stdin 加了 `accepts_additional_context`，重连那次为 `false`。cairn 照它不注入（DESIGN §10.5），实现任务里补上了。
+
 ## 其余照原样（主控的理解）
 
 - 来源是 `canter:<session_id>`；`cairn status --json` 加 `agents.canter`，字段和另外两家一样（`installed`、`last_seen` 四个键），按 §7.1 的“只加不改”写进公开约定。没有 canter 配置目录或没装时 `installed` 是 `false`、`last_seen` 全是 `null`，不报错。

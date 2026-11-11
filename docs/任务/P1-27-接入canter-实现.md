@@ -26,6 +26,7 @@
 照 DESIGN（D16、§10.5）：
 
 - `cairn hook canter`：认 SessionStart、UserPromptSubmit、Stop、SessionEnd，读的字段和输出见 §10.5 的表；来源是 `canter:<session_id>`；没有回合标识，turn_key 留空。输出只用 JSON 的 `hookSpecificOutput.additionalContext`。
+- 断线重连（11-11 补，canter P2-284）：SessionStart 的 stdin 有 `accepts_additional_context: false` 时，照 §10.5“断线重连”：记事件、`hook_seen`、起等待进程，不渲染注入、不写 `injections`、不改 `ledger_injected_version`，不输出。为 `true` 或没有这个字段，照现在的 resume 做法。
 - 子会话：stdin 带 `agent_id` 的事件一律不处理：不记事件、不记 `hook_seen`、不注入、不起进程，退出 0、不输出。
 - 会话记录解析器 `canter`：只读 §8.8 里写的两种行（用户消息、模型回复），其余行跳过；回退、撤回不处理。和另外两家一样从上次读到的位置往后读，“没什么可写”“解析不了”的规则照旧。
 - `cairn install|uninstall --agent canter`：配置在 `$CANTER_HOME/config.json`，没设就是 `~/.canter/config.json`。照 §10.5“安装”：先预览、确认才写、先备份；只合并和删 cairn 自己的条目，别的内容原样保留；解析不了的文件拒绝；配置目录不存在就拒绝、给一行原因，不建目录；目录在、文件不在就新建只有 `hooks` 的文件；不写 `timeout`；不加放行 `save` 的规则。
@@ -47,7 +48,7 @@
 6. 在 canter 子会话里打字，不产生新来源。
 
 验证只做这些：
-- 针对这件活的测试：用合成的 canter 钩子 JSON 和合成的 `events.jsonl` 夹具（照 canter 公开约定写），在隔离目录（临时 `HOME`、`XDG_STATE_HOME`、`CANTER_HOME`）里测 hook、解析器、install/uninstall、status；边角带上：版本 5 的库升到 6 后旧的 `hook_seen` 行还在；canter 配置里有别的内容时原样保留；没有 canter 配置目录时 `status` 正常；带 `agent_id` 的事件什么都不写。
+- 针对这件活的测试：用合成的 canter 钩子 JSON 和合成的 `events.jsonl` 夹具（照 canter 公开约定写），在隔离目录（临时 `HOME`、`XDG_STATE_HOME`、`CANTER_HOME`）里测 hook、解析器、install/uninstall、status；边角带上：`accepts_additional_context` 为 `false` 时不输出、不记已注入，之后发话时补上；没有这个字段时和 `true` 一样；版本 5 的库升到 6 后旧的 `hook_seen` 行还在；canter 配置里有别的内容时原样保留；没有 canter 配置目录时 `status` 正常；带 `agent_id` 的事件什么都不写。
 - 标准检查跑一次：`cargo test --all-targets`、`cargo clippy --all-targets -- -D warnings`。
 - 觉得不够，在回复里说，不要自己加。
 

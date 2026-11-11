@@ -14,7 +14,7 @@
 
 **2026-10-16 修订（经验沉淀，P1-19）**：在项目的账里加第四类条目“经验”（`lesson`）：做过才知道的做法和教训。和记账同一次调用一起记，不加表、不升表结构，注入里单独成一节，从会话摘要那份匀出约 1,500 字符。改动处标了"2026-10-16 经验"，在 §1、D2、新增 D15、§6.2、§7、§7.1、§8.9、§9.1、§9.5、§9.6、§13、§14、§15。逐条的决定（E1–E14）和验收六条见[经验沉淀设计草案](经验沉淀设计草案.md)。**还没实现**。
 
-**2026-11-11 修订（接入 canter，P1-27）**：canter 成为第三家 agent，和 Claude Code、Codex 一样开局注入、发话时补注入、会后写摘要和记账（用户转述：「其实就是canter接入cairn之后就是和现在接入cairn的codex和claude code对齐了呗」）。canter 是可选的：机器上没有 canter 不影响另外两家（「cairn是一个独立的记忆服务。不能因为机器上没有canter就失败」）；只照 canter 的公开接口接，canter 不为 cairn 写特例。用户 11-11 定：canter 子会话的事件不处理；canter 的会话记录只读公开约定里的行（不读工具输出）；断线重连那次的 SessionStart 分不出来，先接着、列为限制（R28），另写需求交 canter；回退、撤回不处理，和另外两家一样（R29）。改动处标了"2026-11-11 canter"，在 §1、D10、新增 D16、§3、§4、§5、§6.2 版本 6、§7、§7.1、§8.8、新增 §10.5、§10.3、§12、§13、§14、§15。需求和经过见 `docs/任务/P1-27-接入canter.md`。**还没实现**。
+**2026-11-11 修订（接入 canter，P1-27）**：canter 成为第三家 agent，和 Claude Code、Codex 一样开局注入、发话时补注入、会后写摘要和记账（用户转述：「其实就是canter接入cairn之后就是和现在接入cairn的codex和claude code对齐了呗」）。canter 是可选的：机器上没有 canter 不影响另外两家（「cairn是一个独立的记忆服务。不能因为机器上没有canter就失败」）；只照 canter 的公开接口接，canter 不为 cairn 写特例。用户 11-11 定：canter 子会话的事件不处理；canter 的会话记录只读公开约定里的行（不读工具输出）；断线重连那次的 SessionStart 分不出来，另写需求交 canter，canter 当天加了 `accepts_additional_context`（P2-284），cairn 照它不注入，旧版 canter 仍列为限制（R28）；回退、撤回不处理，和另外两家一样（R29）。改动处标了"2026-11-11 canter"，在 §1、D10、新增 D16、§3、§4、§5、§6.2 版本 6、§7、§7.1、§8.8、新增 §10.5、§10.3、§12、§13、§14、§15。需求和经过见 `docs/任务/P1-27-接入canter.md`。**还没实现**。
 
 背景、讨论过程和被否决的方案见[背景与决策记录](背景与决策记录.md)；agent hooks 的官方资料摘录见[调研/agent-hooks资料](调研/agent-hooks资料.md)。
 
@@ -988,7 +988,7 @@ save 进程里：
 
 | 事件 | 读取的字段 | 输出 |
 |---|---|---|
-| SessionStart | `session_id`、`cwd`、`source`（startup / resume）、`transcript_path` | JSON 格式的 `hookSpecificOutput.additionalContext`；canter 只认这个，纯文本不注入 |
+| SessionStart | `session_id`、`cwd`、`source`（startup / resume）、`transcript_path`、`accepts_additional_context`（canter P2-284 起） | JSON 格式的 `hookSpecificOutput.additionalContext`；canter 只认这个，纯文本不注入。`accepts_additional_context` 为 `false` 时不输出（见“断线重连”） |
 | UserPromptSubmit | `session_id`、`cwd`、`transcript_path`；没有回合标识（§3） | 有要补的摘要或账的变动时输出 JSON 格式的 `hookSpecificOutput.additionalContext`（§9.5），canter 把它放在这条用户输入前面；否则不输出。不读 `prompt` |
 | Stop | `session_id`、`cwd`、`transcript_path` | 不输出（不读 `last_assistant_message`）；起等待进程（§8.8） |
 | SessionEnd | `session_id`、`cwd`、`reason`（client_exit / client_request / server_shutdown） | 不输出 |
@@ -996,14 +996,16 @@ save 进程里：
 - `source` 照字面对到 start_kind（§8.1）：startup 完整注入，resume 照 resume 的做法。
 - **子会话**（用户 11-11 定：不算）：stdin 带 `agent_id` 的事件（canter 子会话只会发 UserPromptSubmit，用户直接在子会话里打字时）一律不处理：不记事件、不记 `hook_seen`、不注入、不起进程，退出 0、不输出。子会话不发 SessionStart、Stop、SessionEnd，照普通会话记会多出一个来源，之后给子任务的片段单独写一份摘要，和主会话的并列注入；主会话的会话记录里本来就有派活和收结果的经过。Claude Code 的子 agent 现在也不单独记。
 - StopFailure（轮出错）、Interrupt（被打断）不装、不处理，和另外两家一样：没有 Stop 的轮靠会话安静 3 分钟、会话结束或同一工作线上有新会话开局来写摘要。
-- **断线重连**：客户端离开、canter 发过 SessionEnd 之后重连，canter 再发一次 SessionStart(resume)，这次只通知、丢掉输出；stdin 和打开存盘会话那次分不出来。cairn 照 resume 处理，会把这次的内容记成已注入（R28）。已写需求交用户转 canter，请它让钩子能分辨；canter 加了之后再改这里。
+- **断线重连**：客户端离开、canter 发过 SessionEnd 之后重连，canter 再发一次 SessionStart(resume)，这次只通知、丢掉输出。canter P2-284（`93735ad`，11-11）起 stdin 带布尔字段 `accepts_additional_context`：新建、打开存盘会话为 `true`，重连为 `false`（cairn 提的需求，用户转给 canter）。cairn 的做法：
+  - `false`：照 §8.1 记 `session_started`、`hook_seen`，给同一工作线上该写摘要的别的会话起等待进程（第 1–4 步）；不渲染注入、不写 `injections`、不改 `ledger_injected_version`，不输出。没给模型看过的摘要和账的变动，留给下一次发话时照 §9.5 补注入。§9.5 按这个会话第一次开局的时间判断补哪些，所以重连就当这个会话一直没断，和一直开着的 Claude、Codex 会话一样：和它并排跑、之后才停的会话的摘要不补。
+  - `true`，或者没有这个字段（P2-284 之前的 canter）：照现在的 resume 做法。旧版 canter 重连那次仍会被记成已注入（R28）。
 - **配置位置**：只有全局 `$CANTER_HOME/config.json`，没设 `CANTER_HOME` 就是 `~/.canter/config.json`，取运行 `install`、`status` 时的环境。canter 没有项目级钩子，没有 Codex 那种 hook 信任审核；改了配置下一轮生效，不用重启。
 - **安装**：照 §10.3 通则（先 `--dry-run`、确认才写、先备份、只合并和删 cairn 自己的条目）。canter 配置结构不对会让整份配置作废、退回旧配置，所以别的内容原样保留，解析不了的文件拒绝改动。配置目录不存在：拒绝，给一行原因，不替 canter 建目录。目录在、文件不在：新建一个只有 `hooks` 的文件。四个 hook 都不写 `timeout`，用 canter 的缺省 60 秒：SessionStart 在首次模型请求前最多等到 cairn 退出，cairn 的 hook 本身很快、各步都有时限；关会话和停机时 canter 另有 10 秒的共同上限。命令写稳定路径（§10.3），canter 钩子的 PATH 来自客户端，靠不住。不像 Claude 那样加放行 `save` 的规则，也不碰 canter 的 `rules.json`。
 - **不依赖 canter 在不在**：不调 canter 命令、不连它的服务端、不查它的版本。没装 canter、没有配置目录、服务端没在跑，`status` 照实报没装或 `last_seen` 为空，另外两家照常。装到不认 `hooks` 或不认 `additionalContext` 的旧 canter 上会怎样由 canter 决定，cairn 照 `last_seen` 报（R30）。
 - **环境**：canter 钩子用打开会话的那个客户端的环境，corral 带 `--env CAIRN_DISABLE=1` 开的 canter，钩子里照样看得到，照 §8.1 不处理。受限（没信任）的目录里 canter 不跑任何钩子，cairn 读不到这个状态，`status` 看 `last_seen`。
 - **会话记录**：`transcript_path` 是本会话的 `events.jsonl`，只追加。解析器只读公开约定里的行，回退、撤回不处理（§8.8、R29）。
 - `cairn save` 在 canter 的模型沙箱里能不能写进暂存区（§6.5），没核对，实测时看（§15）；save 是自愿的，写不了不影响摘要。
-- **实测**：和第一阶段一样，接之前在隔离的 `CANTER_HOME` 里实测（用户 11-11 定：用户在隔离目录里登录一次，测完删目录，不碰真实的 `~/.canter`）：开局注入、发话时补注入真的进了模型；子会话打字不产生新来源；`cairn save`。
+- **实测**：和第一阶段一样，接之前在隔离的 `CANTER_HOME` 里实测（用户 11-11 定：用户在隔离目录里登录一次，测完删目录，不碰真实的 `~/.canter`）：开局注入、发话时补注入真的进了模型；断线重连那次不注入、之后发话时补上；子会话打字不产生新来源；`cairn save`。
 
 ## 11. 缺口与现场对比的措辞
 
@@ -1111,7 +1113,7 @@ save 进程里：
 | R25 | 经验记得太碎、和约定重复，或越积越多只剩标题（2026-10-16 经验） | 一批最多 5 笔；“以后都这样”记成约定；要求里写明合并、了结；注入有自己的预算（§9.1） |
 | R26 | 会话摘要的份额从约 6,000 降到约 4,500，长会话的摘要截得更早（2026-10-16 经验） | 账和经验用不满时余下的给摘要；试用看 |
 | R27 | `ledger_runs` 只追加、不清理，库慢慢变大（2026-10-17） | 一行只有计数和原因，一年约 20 MB；真变大了再加清理 |
-| R28 | canter 断线重连那次的 SessionStart(resume) 只通知、不注入，和打开存盘会话分不出来（2026-11-11 canter）。cairn 照 resume 处理，把这次的摘要、账的版本记成已注入，模型其实没看到；之后发话时的补注入也不再补这些 | 用户 11-11 选：先接着，另写需求交用户转 canter，请它让钩子能分辨；canter 加了再改 §10.5。客户端常关常开时更容易碰到 |
+| R28 | canter 断线重连那次的 SessionStart(resume) 只通知、不注入（2026-11-11 canter）。P2-284 之前的 canter 分不出它和打开存盘会话，cairn 照 resume 处理，把这次的摘要、账的版本记成已注入，模型其实没看到 | canter P2-284（11-11）加了 `accepts_additional_context`，为 `false` 时 cairn 不注入、不记已注入（§10.5）；只剩旧版 canter 有这个问题，用户 `canter upgrade` 后就没了 |
 | R29 | canter 回退、撤回掉的轮照样进摘要和账（2026-11-11 canter）：canter 只在文件后面加一行标记，原消息行还在，cairn 不处理这些标记 | 用户 11-11 定不处理，和 Claude、Codex 现在一样（两家的回退 cairn 也不管）。进了摘要的用 `cairn correct`，进了账的用 `cairn ledger` 改 |
 | R30 | canter 的会话摘要和账里看不到跑了什么命令、测试输出：只读公开约定里的行（2026-11-11 canter）；canter 版本太旧时钩子可能不跑或注入不进去 | 用户 11-11 定只读公开的行；试用后嫌不够，再写需求请 canter 把工具调用加进公开约定。旧版 canter 靠 `status` 的 `last_seen` 看出来 |
 
@@ -1143,6 +1145,6 @@ save 进程里：
 | 会话记录文件被重写变短：摘要（§8.8）和记账（§8.9）都写了“变短就用全文”，但入口只挑“比上次大”的会话，变短的不会重读；之后长过旧偏移时又从旧偏移读 | 两家的会话记录都只追加，没见过变短；用户定先记下不改（2026-10-15 P1-16 交叉审查）。真碰到了摘要和记账一起改 |
 | 截断（2026-10-17，P1-24）：长会话的摘录超过 60 KiB 时只留头 1/4、尾 3/4，记账进度照样越过中间；工具输出只留前 500 字，派出去的 agent 回复末尾的“踩过的坑”进不了记账。候选：记账分段让模型依次看；工具输出留头尾 | 用户 2026-10-17：先只做记录（§8.9“留痕”），看了 `ledger_runs` 的截断统计再定 |
 | 摘要那一步占位丢了时，失败同样记不上；“摘要正在写”在等待进程只是在等时也显示；会话开着时手动 `summarize` 总被挡，提示把“被占用”和“未采用”并成一句（2026-10-17，P1-24） | 没定；留痕上线后看情况 |
-| canter（2026-11-11 canter）：`cairn save` 在 canter 的模型沙箱里能不能写进暂存区；两种注入是不是真进了模型；重连那次（R28）要等 canter 的回复 | 接之前在隔离的 `CANTER_HOME` 里实测（§10.5）；R28 由 canter 定怎么改 |
+| canter（2026-11-11 canter）：`cairn save` 在 canter 的模型沙箱里能不能写进暂存区；两种注入是不是真进了模型；重连那次 `accepts_additional_context` 为 `false` 时确实不注入、之后发话时补上 | 接之前在隔离的 `CANTER_HOME` 里实测（§10.5）。R28 已由 canter P2-284 解决（新版 canter） |
 
 第一阶段结论与证据见[能力实测报告](调研/第一阶段能力实测.md) §11、§14。主控已向用户核实：yolo 只用于实测，D11 不变；非交互注入表现是已知限制，不挡阶段 2，不再追查。门槛 A、B、C、F 在两种工具上都满足本次明确的实测范围（报告 §11、§14.4）：F 的补测缺口来自额外的 `--settings` 参数，产品不用这种方式放规则。
