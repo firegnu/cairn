@@ -8,10 +8,11 @@
 
 ## 真实环境安装
 
-- 现装 **0.8.0**（11-11，P1-27 接入 canter）：`cargo install --path crates/cairn` 装到 `~/.cargo/bin/cairn`，稳定路径 `~/.local/share/cairn/bin/cairn` 链到它。数据库在 `~/.local/state/cairn/`，版本 6。canter 的钩子还没装（`cairn install --agent canter` 等用户自己来），用真实 canter 实测也还没做。
+- 现装 **0.8.0**（11-11，P1-27 接入 canter）：`cargo install --path crates/cairn` 装到 `~/.cargo/bin/cairn`，稳定路径 `~/.local/share/cairn/bin/cairn` 链到它。数据库在 `~/.local/state/cairn/`，版本 6。canter 的钩子 11-11 装在 `~/.canter/config.json`（4 个 hook，不写 timeout；改前备份 `~/.canter/config.json.bak-20261111T122404…`），`canter doctor` 两项配置检查 ok；用真实 canter 实测还没做。
 - 退回 0.7.x：0.7.x 读不了版本 6 的库，要连库换回 `~/.local/state/cairn-backup-0.7.1-20261111-202152/`（版本 5），之后写的会丢。0.7.0 和 0.7.1 之间库结构没变。退回 0.6.x：0.6.x 读不了版本 5 的库，要连库换回 `~/.local/state/cairn-backup-0.6.2-20261017-131451/`（版本 4），之后写的会丢。
 - 历次装前的库备份都在 `~/.local/state/cairn-backup-*`（0.7.1、0.7.0、0.6.2、0.6.1、0.6.0、0.5.0、0.4.1、0.4.0、0.3.0，以及 `cairn-backup-20261010-before-v2` 版本 1）。库有 WAL，备份用 `sqlite3 .backup`，不直接复制文件。删不删由用户定。
 - 装新版的做法：装前用 `sqlite3 .backup` 备份库并跑完整性检查；装后核对 `cairn --version` 两个路径一致。hook 定义没变就不重装。
+- canter 没有 hook 信任审核，改了配置下一轮生效；卸掉用 `cairn uninstall --agent canter`。
 - hook：Claude Code 10-08 装在 `~/.claude/settings.json`（4 个 hook，加一条放行稳定路径 `cairn save` 的规则）；Codex 10-10 装在 `~/.codex/hooks.json`（改前备份 `~/.codex/hooks.json.bak-20261010T071731…`），10-16 重装过（`additionalContextLimit` 12000）。直接启动的 Codex 要用户到 `/hooks` 里信任。卸掉用 `cairn uninstall --agent claude|codex`；对真实配置的改动要用户明确同意。
 
 ## 机器和环境
