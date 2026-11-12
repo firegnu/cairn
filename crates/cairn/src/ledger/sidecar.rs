@@ -24,7 +24,7 @@ const INSTRUCTIONS: &str = r#"你在为一个软件项目维护"项目的账"：
 - 用户定了、做完了、说不做了的悬而未决，了结它；拿不准是否了结，就不了结。
 - 依据摘录会话里用户或助手的原话，不改写、不编。
 - 路径、提交号、版本号这类细节原样照抄。
-- 标题一行，不超过 200 字符；正文不超过 1 KiB；依据不超过 500 字符；一次最多 10 笔账的变动，另外最多 5 笔经验的变动。
+- 标题一行，不超过 200 字符；正文不超过约 300 个汉字；依据不超过 500 字符；一次最多 10 笔账的变动，另外最多 5 笔经验的变动。
 - 经验一次最多记 3 条最值得留的，拿不准的不记。
 - 经验：拿不准的、只发生一次以后不会再遇到的、只是这个会话里的权宜之计，不记。用户说“以后都这样做”的，记成 convention，不记成 lesson。已有相同或相近的经验，改那一条，不要重复新增；两条说的是一回事，改其中一条、了结另一条。经验被证明不对、或者条件已经不成立，了结它，理由写清。
 - 标题、理由、依据不能为空，正文可以为空；字段首尾空白会被去掉。同一条不能既修改又了结。
@@ -89,6 +89,7 @@ pub(crate) enum Mutation {
 
 pub(crate) struct Batch {
     pub mutations: Vec<Mutation>,
+    pub dropped: Vec<String>,
     pub lesson_failure: Option<String>,
 }
 
@@ -104,8 +105,8 @@ impl Mutation {
     }
 }
 
-/// Parse the whole output before validating either group. The snapshot includes
-/// inactive items so an edit/close targeting an old lesson stays in that group.
+/// Drop invalid changes before checking either group's limits. Structural JSON
+/// errors still reject the whole output, including after a dropped change.
 pub(crate) fn parse(output: &str, ledger: &Ledger) -> Result<Batch> {
     if output.len() > OUTPUT_LIMIT {
         return Err("输出不合格：超过 128 KiB".into());
@@ -119,9 +120,10 @@ pub(crate) fn parse(output: &str, ledger: &Ledger) -> Result<Batch> {
         .and_then(serde_json::Value::as_array)
         .ok_or(INVALID_JSON)?;
     let mut mutations = Vec::new();
+    let mut dropped = Vec::new();
     for (index, change) in changes.iter().enumerate() {
         let number = index + 1;
-        let invalid = |rule| format!("输出不合格：第 {number} 笔：{rule}");
+        let invalid = |rule| format!("第 {number} 笔：{rule}");
         let fields = change.as_object().ok_or(INVALID_JSON)?;
         if !["op", "kind", "no", "title", "body", "reason", "evidence"]
             .iter()
@@ -139,72 +141,157 @@ pub(crate) fn parse(output: &str, ledger: &Ledger) -> Result<Batch> {
         };
         let action = fields["op"]
             .as_str()
-            .ok_or_else(|| invalid("操作不支持"))?
+            .ok_or(INVALID_JSON)?
             .trim();
         let mutation = match action {
-            "add" => {
-                let kind = text("kind")?;
-                if !matches!(kind.as_str(), "state" | "open" | "convention" | "lesson") {
-                    return Err(invalid("类不合法").into());
-                }
-                Mutation::Add {
-                    kind,
-                    title: text("title")?,
-                    body: text("body")?,
-                    evidence: text("evidence")?,
-                }
-            }
+            "add" => Mutation::Add {
+                kind: text("kind")?,
+                title: text("title")?,
+                body: text("body")?,
+                evidence: text("evidence")?,
+            },
             "edit" | "close" => {
-                let no = fields["no"].as_i64().ok_or_else(|| invalid("编号不合格"))?;
-                if !ledger.items.iter().any(|i| i.no == no) {
-                    return Err(invalid("编号不存在").into());
+                // Check all used field types before dropping a semantic error.
+                let evidence = text("evidence")?;
+                let (title, body, reason) = if action == "edit" {
+                    (text("title")?, text("body")?, String::new())
+                } else {
+                    (String::new(), String::new(), text("reason")?)
+                };
+                if !fields["no"].is_null() && !fields["no"].is_number() {
+                    return Err(INVALID_JSON.into());
                 }
+                let Some(no) = fields["no"].as_i64() else {
+                    dropped.push(invalid("编号不合格"));
+                    continue;
+                };
                 if action == "edit" {
                     Mutation::Edit {
                         no,
-                        title: text("title")?,
-                        body: text("body")?,
-                        evidence: text("evidence")?,
+                        title,
+                        body,
+                        evidence,
                     }
                 } else {
                     Mutation::Close {
                         no,
-                        reason: text("reason")?,
-                        evidence: text("evidence")?,
+                        reason,
+                        evidence,
                     }
                 }
             }
-            _ => return Err(invalid("操作不支持").into()),
+            _ => {
+                dropped.push(invalid("操作不支持"));
+                continue;
+            }
         };
-        mutations.push((number, mutation.is_lesson(ledger), mutation));
+        match validate(&mutation, ledger) {
+            Ok(()) => mutations.push((number, mutation.is_lesson(ledger), mutation)),
+            Err(reason) => dropped.push(invalid(&reason)),
+        }
     }
     let entries: Vec<_> = mutations
         .iter()
         .filter(|(_, lesson, _)| !lesson)
         .map(|(line, _, m)| (*line, m))
         .collect();
-    validate(&entries, ledger, 10).map_err(|reason| format!("输出不合格：{reason}"))?;
+    validate_group(&entries, 10).map_err(|reason| format!("输出不合格：{reason}"))?;
     let lessons: Vec<_> = mutations
         .iter()
         .filter(|(_, lesson, _)| *lesson)
         .map(|(line, _, m)| (*line, m))
         .collect();
-    let lesson_failure = validate(&lessons, ledger, 5)
+    let lesson_failure = validate_group(&lessons, 5)
         .err()
         .map(|reason| format!("经验没写成：{reason}"));
+    let mutations: Vec<_> = mutations
+        .into_iter()
+        .filter(|(_, lesson, _)| !lesson || lesson_failure.is_none())
+        .map(|(_, _, m)| m)
+        .collect();
+    if mutations.is_empty() && !dropped.is_empty() {
+        let mut reason = format!("输出不合格：{}", dropped.join("；"));
+        if let Some(lesson_failure) = &lesson_failure {
+            reason.push_str(&format!("；{lesson_failure}"));
+        }
+        return Err(reason.into());
+    }
     Ok(Batch {
-        mutations: mutations
-            .into_iter()
-            .filter(|(_, lesson, _)| !lesson || lesson_failure.is_none())
-            .map(|(_, _, m)| m)
-            .collect(),
+        mutations,
+        dropped,
         lesson_failure,
     })
 }
 
-fn validate(
+fn validate(mutation: &Mutation, ledger: &Ledger) -> std::result::Result<(), String> {
+    match mutation {
+        Mutation::Add { kind, .. } => {
+            if !matches!(kind.as_str(), "state" | "open" | "convention" | "lesson") {
+                return Err("类不合法".into());
+            }
+        }
+        Mutation::Edit { no, .. } | Mutation::Close { no, .. } => {
+            if !ledger.items.iter().any(|i| i.no == *no) {
+                return Err("编号不存在".into());
+            }
+        }
+    }
+    let evidence = match mutation {
+        Mutation::Add {
+            title,
+            body,
+            evidence,
+            ..
+        }
+        | Mutation::Edit {
+            title,
+            body,
+            evidence,
+            ..
+        } => {
+            if title.is_empty()
+                || title.chars().count() > 200
+                || title.chars().any(char::is_control)
+            {
+                return Err("标题不合格".into());
+            }
+            if body.len() > 1024 {
+                return Err(format!("正文超过 1 KiB（{} 字节）", body.len()));
+            }
+            evidence
+        }
+        Mutation::Close {
+            reason, evidence, ..
+        } => {
+            if reason.is_empty() {
+                return Err("理由为空".into());
+            }
+            evidence
+        }
+    };
+    if evidence.is_empty() || evidence.chars().count() > 500 {
+        return Err("依据不合格".into());
+    }
+    if let Mutation::Edit { no, .. } | Mutation::Close { no, .. } = mutation {
+        let item = ledger
+            .items
+            .iter()
+            .find(|i| i.no == *no)
+            .ok_or("编号不存在")?;
+        if item.status != "active" || item.deleted_at.is_some() {
+            return Err(if item.kind == "lesson" {
+                "条目不是有效经验"
+            } else {
+                "条目不是有效账目"
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_group(
     mutations: &[(usize, &Mutation)],
-    ledger: &Ledger,
     limit: usize,
 ) -> std::result::Result<(), String> {
     if mutations.len() > limit {
@@ -218,55 +305,7 @@ fn validate(
     let mut targets = std::collections::HashMap::new();
     for (line, mutation) in mutations {
         let invalid = |rule| format!("第 {line} 笔：{rule}");
-        let evidence = match mutation {
-            Mutation::Add {
-                title,
-                body,
-                evidence,
-                ..
-            }
-            | Mutation::Edit {
-                title,
-                body,
-                evidence,
-                ..
-            } => {
-                if title.is_empty()
-                    || title.chars().count() > 200
-                    || title.chars().any(char::is_control)
-                {
-                    return Err(invalid("标题不合格"));
-                }
-                if body.len() > 1024 {
-                    return Err(invalid("正文超过 1 KiB"));
-                }
-                evidence
-            }
-            Mutation::Close {
-                reason, evidence, ..
-            } => {
-                if reason.is_empty() {
-                    return Err(invalid("理由为空"));
-                }
-                evidence
-            }
-        };
-        if evidence.is_empty() || evidence.chars().count() > 500 {
-            return Err(invalid("依据不合格"));
-        }
         if let Mutation::Edit { no, .. } | Mutation::Close { no, .. } = mutation {
-            let item = ledger
-                .items
-                .iter()
-                .find(|i| i.no == *no)
-                .ok_or_else(|| invalid("编号不存在"))?;
-            if item.status != "active" || item.deleted_at.is_some() {
-                return Err(invalid(if item.kind == "lesson" {
-                    "条目不是有效经验"
-                } else {
-                    "条目不是有效账目"
-                }));
-            }
             let edit = matches!(mutation, Mutation::Edit { .. });
             if targets
                 .insert(no, edit)
