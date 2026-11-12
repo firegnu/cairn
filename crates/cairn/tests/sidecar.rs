@@ -1174,7 +1174,7 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
         f.fake_ledger("NOTHING_TO_CONTINUE", output, "");
         let expected = [
             "输出不合格：账的变动超过 10 笔",
-            "丢了第 2 笔：标题不合格",
+            "丢了第 2 笔：标题超过 200 字符",
             "丢了第 2 笔：编号不存在",
             "输出不合格：不是合格的 JSON",
             "输出不合格：不是合格的 JSON",
@@ -1258,7 +1258,7 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
     assert_eq!(runs[0]["lessons"], 5);
     assert_eq!(
         runs[0]["reason"],
-        "丢了第 16 笔：理由为空；丢了第 17 笔：标题不合格"
+        "丢了第 16 笔：理由为空；丢了第 17 笔：标题为空"
     );
 }
 
@@ -1301,7 +1301,7 @@ fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
         ),
         (
             vec![add("lesson", &"界".repeat(201), "body", "evidence")],
-            "第 2 笔：标题不合格",
+            "第 2 笔：标题超过 200 字符",
             false,
         ),
         (
@@ -1593,7 +1593,7 @@ fn ledger_drops_invalid_changes_and_records_only_committed_counts() {
     assert_eq!(runs[0]["ledger_version"], 1);
     assert_eq!(
         runs[0]["reason"],
-        "丢了第 2 笔：正文超过 1 KiB（1026 字节）；丢了第 3 笔：标题不合格"
+        "丢了第 2 笔：正文超过 1 KiB（1026 字节）；丢了第 3 笔：标题为空"
     );
     let (bytes, failures, cleared): (i64, i64, bool) = f.store().connection().query_row(
         "SELECT ledger_bytes,ledger_failures,ledger_last_failure IS NULL AND ledger_last_failure_at IS NULL FROM sessions", [],
@@ -1633,9 +1633,9 @@ fn ledger_records_dropped_changes_alongside_rejected_lesson_group() {
         let result = f.run(&["summarize"], "");
         assert_eq!(result.status.success(), keep_entry);
         let expected = if keep_entry {
-            "丢了第 1 笔：正文超过 1 KiB（1026 字节）；丢了第 2 笔：标题不合格；经验没写成：超过 5 笔"
+            "丢了第 1 笔：正文超过 1 KiB（1026 字节）；丢了第 2 笔：标题为空；经验没写成：超过 5 笔"
         } else {
-            "输出不合格：第 1 笔：正文超过 1 KiB（1026 字节）；第 2 笔：标题不合格；经验没写成：超过 5 笔"
+            "输出不合格：第 1 笔：正文超过 1 KiB（1026 字节）；第 2 笔：标题为空；经验没写成：超过 5 笔"
         };
         let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
         assert_eq!(
@@ -1747,13 +1747,13 @@ fn ledger_invalid_outputs_do_not_write_and_failures_stop_only_automatic_attempts
             "第 1 笔：类不合法",
             "第 1 笔：编号不存在",
             "第 3 笔：同一条既改又了结",
-            "第 1 笔：标题不合格",
+            "第 1 笔：标题超过 200 字符",
             "第 1 笔：正文超过 1 KiB（1026 字节）",
             "第 1 笔：依据不合格",
             "账的变动超过 10 笔",
             "不是合格的 JSON",
             "不是合格的 JSON",
-            "第 1 笔：标题不合格",
+            "第 1 笔：标题有换行或控制字符",
             "第 1 笔：依据不合格",
             "不是合格的 JSON",
             "第 1 笔：编号不合格",
@@ -1763,7 +1763,7 @@ fn ledger_invalid_outputs_do_not_write_and_failures_stop_only_automatic_attempts
             "不是合格的 JSON",
             "不是合格的 JSON",
             "不是合格的 JSON",
-            "第 1 笔：正文超过 1 KiB（1026 字节）；第 2 笔：标题不合格",
+            "第 1 笔：正文超过 1 KiB（1026 字节）；第 2 笔：标题为空",
             "不是合格的 JSON",
         ][index];
         assert_eq!(reason, format!("输出不合格：{expected}"));
