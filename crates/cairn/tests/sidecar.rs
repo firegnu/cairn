@@ -1143,9 +1143,6 @@ case "$input" in *'excluded-content'*) exit 82 ;; esac
 
 #[test]
 fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_everything() {
-    let f = Fixture::new();
-    f.ok(&["adopt"], "");
-    f.session("one", "synthetic mixed batch");
     let entry = add("state", "state title", "body", "evidence");
     let lesson = add("lesson", "lesson title", "body", "evidence");
     let mut overflow = vec![entry.clone(); 11];
@@ -1171,7 +1168,33 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
         ]),
     ];
     for (n, output) in invalid.iter().enumerate() {
+        let f = Fixture::new();
+        f.ok(&["adopt"], "");
+        f.session("one", "synthetic mixed batch");
         f.fake_ledger("NOTHING_TO_CONTINUE", output, "");
+        let expected = [
+            "输出不合格：账的变动超过 10 笔",
+            "丢了第 2 笔：标题不合格",
+            "丢了第 2 笔：编号不存在",
+            "输出不合格：不是合格的 JSON",
+            "输出不合格：不是合格的 JSON",
+            "输出不合格：不是合格的 JSON",
+            "丢了第 3 笔：操作不支持",
+        ][n];
+        if matches!(n, 1 | 2 | 6) {
+            f.ok(&["summarize"], "");
+            let runs: Value =
+                serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+            assert_eq!(runs[0]["outcome"], "changed");
+            assert_eq!(runs[0]["entries"], usize::from(n == 6));
+            assert_eq!(runs[0]["lessons"], 1);
+            assert_eq!(runs[0]["reason"], expected);
+            assert_eq!(
+                f.ledger()["items"].as_array().unwrap().len(),
+                if n == 6 { 2 } else { 1 }
+            );
+            continue;
+        }
         assert!(
             !f.run(&["summarize"], "").status.success(),
             "accepted {output}"
@@ -1187,18 +1210,12 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
             )
             .unwrap();
         assert_eq!(bytes, 0);
-        assert_eq!(failures, n as i64 + 1);
-        let expected = [
-            "账的变动超过 10 笔",
-            "第 2 笔：标题不合格",
-            "第 2 笔：编号不存在",
-            "不是合格的 JSON",
-            "不是合格的 JSON",
-            "不是合格的 JSON",
-            "第 3 笔：操作不支持",
-        ][n];
-        assert_eq!(reason, format!("输出不合格：{expected}"));
+        assert_eq!(failures, 1);
+        assert_eq!(reason, expected);
     }
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic mixed batch");
     f.fake_ledger(
         "NOTHING_TO_CONTINUE",
         changes(&[vec![entry; 10], vec![lesson; 5]].concat()),
@@ -1228,11 +1245,21 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
             edit(n, "revised lesson", "body", "evidence")
         }
     }));
+    // Rejected changes count toward neither the caps nor edit/close conflicts.
+    output.push(close(1, "", "evidence"));
+    output.push(edit(12, "", "body", "evidence"));
     f.fake_ledger("NOTHING_TO_CONTINUE", changes(&output), "");
     f.ok(&["summarize"], "");
     assert_eq!(f.ledger()["version"], 2);
     assert_eq!(f.ledger_item("11")["item"]["title"], "revised lesson");
     assert_eq!(f.ledger_item("12")["item"]["status"], "closed");
+    let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+    assert_eq!(runs[0]["entries"], 10);
+    assert_eq!(runs[0]["lessons"], 5);
+    assert_eq!(
+        runs[0]["reason"],
+        "丢了第 16 笔：理由为空；丢了第 17 笔：标题不合格"
+    );
 }
 
 #[test]
@@ -1270,37 +1297,44 @@ fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
             ]
             .concat(),
             "超过 5 笔",
+            true,
         ),
         (
             vec![add("lesson", &"界".repeat(201), "body", "evidence")],
             "第 2 笔：标题不合格",
+            false,
         ),
         (
             vec![edit(1, "title", &"界".repeat(342), "evidence")],
-            "第 2 笔：正文超过 1 KiB",
+            "第 2 笔：正文超过 1 KiB（1026 字节）",
+            false,
         ),
         (
             vec![close(2, "reason", &"界".repeat(501))],
             "第 2 笔：依据不合格",
+            false,
         ),
-        (vec![close(2, "", "evidence")], "第 2 笔：理由为空"),
+        (vec![close(2, "", "evidence")], "第 2 笔：理由为空", false),
         (
             vec![
                 edit(1, "revised", "body", "evidence"),
                 close(1, "reason", "evidence"),
             ],
             "第 3 笔：同一条既改又了结",
+            true,
         ),
         (
             vec![edit(3, "revised", "body", "evidence")],
             "第 2 笔：条目不是有效经验",
+            false,
         ),
         (
             vec![close(4, "reason", "evidence")],
             "第 2 笔：条目不是有效经验",
+            false,
         ),
     ];
-    for (invalid, reason) in cases {
+    for (invalid, reason, group_failure) in cases {
         let f = Fixture::new();
         f.ok(&["adopt"], "");
         for title in ["first", "second", "closed", "deleted"] {
@@ -1316,15 +1350,21 @@ fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
             "",
         );
         let output = f.ok(&["summarize"], "");
-        assert!(
-            output.contains(&format!("经验没写成：{reason}")),
-            "{output}"
-        );
+        let expected_reason = if group_failure {
+            assert!(
+                output.contains(&format!("经验没写成：{reason}")),
+                "{output}"
+            );
+            format!("经验没写成：{reason}")
+        } else {
+            assert!(!output.contains("没写成"), "{output}");
+            format!("丢了{reason}")
+        };
         let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
         assert_eq!(runs[0]["outcome"], "changed");
         assert_eq!(runs[0]["entries"], 1);
         assert_eq!(runs[0]["lessons"], 0);
-        assert_eq!(runs[0]["reason"], format!("经验没写成：{reason}"));
+        assert_eq!(runs[0]["reason"], expected_reason);
         let after = f.ledger();
         assert_eq!(after["version"], 7);
         assert_eq!(after["items"][0]["title"], "survives");
@@ -1347,15 +1387,15 @@ fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
         );
         assert_eq!(failures, 0);
         let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
-        assert_eq!(
-            status["ledger"]["last_failure"]["reason"],
-            format!("经验没写成：{reason}")
-        );
-        assert_eq!(status["ledger"]["last_failure"]["source_id"], "claude:one");
-        assert!(status["ledger"]["last_failure"]["at"].is_string());
-        assert!(f
-            .ok(&["status"], "")
-            .contains(&format!("经验没写成：{reason}")));
+        if group_failure {
+            assert_eq!(status["ledger"]["last_failure"]["reason"], expected_reason);
+            assert_eq!(status["ledger"]["last_failure"]["source_id"], "claude:one");
+            assert!(status["ledger"]["last_failure"]["at"].is_string());
+            assert!(f.ok(&["status"], "").contains(&expected_reason));
+        } else {
+            assert!(status["ledger"]["last_failure"].is_null());
+            assert_eq!(status["ledger"]["failed_sessions"], 0);
+        }
         assert!(f.ok(&["summarize"], "").contains("没有需要"));
         // The rejected lessons are not retried with the next excerpt, and a
         // successful batch clears the observation without consuming retries.
@@ -1389,6 +1429,7 @@ fn lesson_sidecar_records_evidence_history_and_receives_active_lessons_and_instr
 case "$input" in *'账里只有四类条目'*'lesson（经验）：做过才知道'*'kind（state、open、convention、lesson 之一）'*'一次最多 10 笔账的变动，另外最多 5 笔经验的变动'*'经验一次最多记 3 条最值得留的'*'拿不准的、只发生一次以后不会再遇到的、只是这个会话里的权宜之计，不记'*'记成 convention，不记成 lesson'*'改其中一条、了结另一条'*'经验被证明不对、或者条件已经不成立，了结它，理由写清'*) ;; *) exit 83 ;; esac
 case "$input" in *'当前的账'*'#1 lesson | 原来教训 | 旧正文'*'#2 lesson | 重复教训 | 重复正文'*'会话摘录'*'synthetic-lesson-evidence'*) ;; *) exit 84 ;; esac
 case "$input" in *'#3 lesson'*) exit 85 ;; esac
+case "$input" in *'正文不超过约 300 个汉字'*) ;; *) exit 86 ;; esac
 "#,
     );
     f.ok(&["summarize"], "");
@@ -1512,7 +1553,128 @@ case "$input" in *'user: old-ledger-message'*|*'#1 open'*) exit 84 ;; esac
 }
 
 #[test]
-fn ledger_invalid_batches_are_discarded_whole_and_failures_stop_only_automatic_attempts() {
+fn ledger_drops_invalid_changes_and_records_only_committed_counts() {
+    let f = Fixture::new();
+    f.ok(&["adopt"], "");
+    f.session("one", "synthetic mixed valid and invalid changes");
+    f.store().connection().execute(
+        "UPDATE sessions SET ledger_failures=1,ledger_last_failure='previous failure',ledger_last_failure_at='2026-11-12T00:00:00Z'", [],
+    ).unwrap();
+    f.fake_ledger(
+        "NOTHING_TO_CONTINUE",
+        changes(&[
+            add("state", "kept state", "body", "evidence"),
+            add(
+                "open",
+                "too long",
+                &format!(" \n{}\t ", "界".repeat(342)),
+                "evidence",
+            ),
+            add("lesson", " \n\t ", "body", "evidence"),
+            add("lesson", "kept lesson", "body", "evidence"),
+        ]),
+        "",
+    );
+    let result = f.run(&["summarize"], "");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let ledger = f.ledger();
+    assert_eq!(ledger["version"], 1);
+    assert_eq!(ledger["items"].as_array().unwrap().len(), 2);
+    assert_eq!(f.ledger_item("1")["item"]["title"], "kept state");
+    assert_eq!(f.ledger_item("2")["item"]["title"], "kept lesson");
+    let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+    assert_eq!(runs[0]["outcome"], "changed");
+    assert_eq!(runs[0]["entries"], 1);
+    assert_eq!(runs[0]["lessons"], 1);
+    assert_eq!(runs[0]["ledger_version"], 1);
+    assert_eq!(
+        runs[0]["reason"],
+        "丢了第 2 笔：正文超过 1 KiB（1026 字节）；丢了第 3 笔：标题不合格"
+    );
+    let (bytes, failures, cleared): (i64, i64, bool) = f.store().connection().query_row(
+        "SELECT ledger_bytes,ledger_failures,ledger_last_failure IS NULL AND ledger_last_failure_at IS NULL FROM sessions", [],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(
+        bytes as u64,
+        fs::metadata(f.path("one.jsonl")).unwrap().len()
+    );
+    assert_eq!(failures, 0);
+    assert!(cleared);
+    let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
+    assert_eq!(status["ledger"]["failed_sessions"], 0);
+    assert!(status["ledger"]["last_failure"].is_null());
+    assert!(!f.ok(&["show"], "").contains("没写成"));
+}
+
+#[test]
+fn ledger_records_dropped_changes_alongside_rejected_lesson_group() {
+    for keep_entry in [false, true] {
+        let f = Fixture::new();
+        f.ok(&["adopt"], "");
+        f.session("one", "synthetic rejected changes and lesson group");
+        let mut output = vec![
+            add(
+                "state",
+                "long body",
+                &format!(" {} ", "界".repeat(342)),
+                "evidence",
+            ),
+            add("lesson", "", "body", "evidence"),
+        ];
+        output.extend(vec![add("lesson", "lesson", "body", "evidence"); 6]);
+        if keep_entry {
+            output.push(add("state", "survives", "body", "evidence"));
+        }
+        f.fake_ledger("NOTHING_TO_CONTINUE", changes(&output), "");
+        let result = f.run(&["summarize"], "");
+        assert_eq!(result.status.success(), keep_entry);
+        let expected = if keep_entry {
+            "丢了第 1 笔：正文超过 1 KiB（1026 字节）；丢了第 2 笔：标题不合格；经验没写成：超过 5 笔"
+        } else {
+            "输出不合格：第 1 笔：正文超过 1 KiB（1026 字节）；第 2 笔：标题不合格；经验没写成：超过 5 笔"
+        };
+        let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+        assert_eq!(
+            runs[0]["outcome"],
+            if keep_entry { "changed" } else { "failed" }
+        );
+        assert_eq!(runs[0]["entries"], usize::from(keep_entry));
+        assert_eq!(runs[0]["lessons"], 0);
+        assert_eq!(runs[0]["reason"], expected);
+        assert_eq!(f.ledger()["version"], i64::from(keep_entry));
+        assert_eq!(
+            f.ledger()["items"].as_array().unwrap().len(),
+            usize::from(keep_entry)
+        );
+        let (bytes, failures, reason): (i64, i64, String) = f
+            .store()
+            .connection()
+            .query_row(
+                "SELECT ledger_bytes,ledger_failures,ledger_last_failure FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        if keep_entry {
+            assert_eq!(
+                bytes as u64,
+                fs::metadata(f.path("one.jsonl")).unwrap().len()
+            );
+            assert_eq!(failures, 0);
+            assert_eq!(reason, "经验没写成：超过 5 笔");
+        } else {
+            assert_eq!((bytes, failures), (0, 1));
+            assert_eq!(reason, expected);
+        }
+    }
+}
+
+#[test]
+fn ledger_invalid_outputs_do_not_write_and_failures_stop_only_automatic_attempts() {
     let f = Fixture::new();
     f.ok(&["adopt"], "");
     f.ok(&["ledger", "add", "state", "original"], "original body");
@@ -1526,25 +1688,42 @@ fn ledger_invalid_batches_are_discarded_whole_and_failures_stop_only_automatic_a
     missing.as_object_mut().unwrap().remove("evidence");
     let mut invalid_no = edit(1, "title", "body", "evidence");
     invalid_no["no"] = serde_json::json!(1.5);
+    let mut wrong_type = add("bogus", "title", "body", "evidence");
+    wrong_type["body"] = serde_json::json!(42);
+    let mut wrong_op_type = prefix.clone();
+    wrong_op_type["op"] = serde_json::json!(42);
+    let mut wrong_no_type = edit(1, "title", "body", "evidence");
+    wrong_no_type["no"] = serde_json::json!("1");
     let invalid = vec![
-        batch(vec![add("bogus", "title", "body", "evidence")]),
-        batch(vec![edit(999, "title", "body", "evidence")]),
+        changes(&[add("bogus", "title", "body", "evidence")]),
+        changes(&[edit(999, "title", "body", "evidence")]),
         batch(vec![
             edit(1, "title", "body", "evidence"),
             close(1, "reason", "evidence"),
         ]),
-        batch(vec![add("state", &"界".repeat(201), "body", "evidence")]),
-        batch(vec![add("state", "title", &"界".repeat(342), "evidence")]),
-        batch(vec![add("state", "title", "body", &"界".repeat(501))]),
+        changes(&[add("state", &"界".repeat(201), "body", "evidence")]),
+        changes(&[add("state", "title", &"界".repeat(342), "evidence")]),
+        changes(&[add("state", "title", "body", &"界".repeat(501))]),
         batch(vec![add("state", "title", "body", "evidence"); 10]),
         r#"{"changes":[{"body":"bad\q"}]}"#.into(),
         r#"{"changes":["#.into(),
-        batch(vec![add("state", "title\nline", "body", "evidence")]),
-        batch(vec![add("state", "title", "body", "")]),
+        changes(&[add("state", "title\nline", "body", "evidence")]),
+        changes(&[add("state", "title", "body", "")]),
         batch(vec![missing]),
-        batch(vec![invalid_no]),
+        changes(&[invalid_no]),
         "[]".into(),
         r#"{"changes":null}"#.into(),
+        batch(vec![wrong_type]),
+        batch(vec![wrong_op_type]),
+        batch(vec![wrong_no_type]),
+        batch(vec![
+            add("state", "", "body", "evidence"),
+            serde_json::json!({}),
+        ]),
+        changes(&[
+            add("state", "long body", &"界".repeat(342), "evidence"),
+            add("lesson", "", "body", "evidence"),
+        ]),
         format!("```\n{}\n```", changes(&[prefix])),
     ];
     for (index, invalid) in invalid.iter().enumerate() {
@@ -1565,21 +1744,26 @@ fn ledger_invalid_batches_are_discarded_whole_and_failures_stop_only_automatic_a
         assert_eq!(bytes, 0);
         assert_eq!(failures, index as i64 + 1);
         let expected = [
-            "第 2 笔：类不合法",
-            "第 2 笔：编号不存在",
+            "第 1 笔：类不合法",
+            "第 1 笔：编号不存在",
             "第 3 笔：同一条既改又了结",
-            "第 2 笔：标题不合格",
-            "第 2 笔：正文超过 1 KiB",
-            "第 2 笔：依据不合格",
+            "第 1 笔：标题不合格",
+            "第 1 笔：正文超过 1 KiB（1026 字节）",
+            "第 1 笔：依据不合格",
             "账的变动超过 10 笔",
             "不是合格的 JSON",
             "不是合格的 JSON",
-            "第 2 笔：标题不合格",
-            "第 2 笔：依据不合格",
+            "第 1 笔：标题不合格",
+            "第 1 笔：依据不合格",
             "不是合格的 JSON",
-            "第 2 笔：编号不合格",
+            "第 1 笔：编号不合格",
             "不是合格的 JSON",
             "不是合格的 JSON",
+            "不是合格的 JSON",
+            "不是合格的 JSON",
+            "不是合格的 JSON",
+            "不是合格的 JSON",
+            "第 1 笔：正文超过 1 KiB（1026 字节）；第 2 笔：标题不合格",
             "不是合格的 JSON",
         ][index];
         assert_eq!(reason, format!("输出不合格：{expected}"));

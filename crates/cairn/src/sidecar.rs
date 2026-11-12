@@ -650,7 +650,13 @@ fn write_ledger(
         }
         .into();
         run.ledger_version = (!batch.mutations.is_empty()).then_some(ledger.version + 1);
-        run.reason.clone_from(&batch.lesson_failure);
+        let reasons: Vec<_> = batch
+            .dropped
+            .iter()
+            .map(|reason| format!("丢了{reason}"))
+            .chain(batch.lesson_failure.iter().cloned())
+            .collect();
+        run.reason = (!reasons.is_empty()).then(|| reasons.join("；"));
         run.finished_at = crate::save::now();
         run.insert(&tx)?;
         tx.commit()?;
