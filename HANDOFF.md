@@ -8,7 +8,8 @@
 
 ## 真实环境安装
 
-- 现装 **0.8.0**（11-11，P1-27 接入 canter）：`cargo install --path crates/cairn` 装到 `~/.cargo/bin/cairn`，稳定路径 `~/.local/share/cairn/bin/cairn` 链到它。数据库在 `~/.local/state/cairn/`，版本 6。canter 的钩子 11-11 装在 `~/.canter/config.json`（4 个 hook，不写 timeout；改前备份 `~/.canter/config.json.bak-20261111T122404…`），`canter doctor` 两项配置检查 ok；用真实 canter 实测还没做。
+- 现装 **0.8.1**（11-12，0.8.0 加 P1-29 记账单笔有问题只丢那一笔、P1-31 标题不合格分三种原因报；库结构、hook 定义没变）：`cargo install --path crates/cairn` 装到 `~/.cargo/bin/cairn`，稳定路径 `~/.local/share/cairn/bin/cairn` 链到它。数据库在 `~/.local/state/cairn/`，版本 6。canter 的钩子 11-11 装在 `~/.canter/config.json`（4 个 hook，不写 timeout；改前备份 `~/.canter/config.json.bak-20261111T122404…`），`canter doctor` 两项配置检查 ok；用真实 canter 实测还没做。
+- 退回 0.8.0：库结构没变，直接装回 0.8.0 即可，不用换库。装 0.8.1 前的库备份 `~/.local/state/cairn-backup-0.8.0-20261112-091310/`（`sqlite3 .backup`，integrity_check ok）。
 - 退回 0.7.x：0.7.x 读不了版本 6 的库，要连库换回 `~/.local/state/cairn-backup-0.7.1-20261111-202152/`（版本 5），之后写的会丢。0.7.0 和 0.7.1 之间库结构没变。退回 0.6.x：0.6.x 读不了版本 5 的库，要连库换回 `~/.local/state/cairn-backup-0.6.2-20261017-131451/`（版本 4），之后写的会丢。
 - 历次装前的库备份都在 `~/.local/state/cairn-backup-*`（0.7.1、0.7.0、0.6.2、0.6.1、0.6.0、0.5.0、0.4.1、0.4.0、0.3.0，以及 `cairn-backup-20261010-before-v2` 版本 1）。库有 WAL，备份用 `sqlite3 .backup`，不直接复制文件。删不删由用户定。
 - 装新版的做法：装前用 `sqlite3 .backup` 备份库并跑完整性检查；装后核对 `cairn --version` 两个路径一致。hook 定义没变就不重装。
@@ -42,8 +43,6 @@
 - `docs/任务/P1-23-记忆系统的后续缺口.md`：条目多了开局只剩标题、记下的对不对没反馈、跨项目经验没地方去。
 - `docs/任务/P1-24-记账停了但不报失败.md`：第一步“留痕”已由 P1-25 做掉；剩截断（60 KiB 头尾、工具输出 500 字），等看了 `ledger runs` 的截断统计再定（DESIGN §15）。
 - `docs/任务/P1-28-读Codex压缩后的会话记录.md`：Codex 把旧会话记录压成 `.jsonl.zst` 后 cairn 报 NotFound（开局“3 个会话记账没写成”就是这个）；用户选解压了照样读；用户 11-11 说暂时不做，以后再做。
-- P1-29（单笔有问题只丢那一笔、正文要求约 300 个汉字）11-12 已合并进 main，**还没装到真实环境**（真实环境仍是 0.8.0）；装上后 paddock 没写成的会话要不要补记，用户定。
-- `docs/任务/P1-31-记账标题不合格.md`：原因已查明（paddock `#2` 标题每次追加，超过 200 字符；paddock 主控 11-12 已缩短 `#2`、`#1`）。用户定 a+c：要求里加“标题不往后追加清单”，“标题不合格”按三种原因分开报；P1-29 已合并，可以派。
 - `docs/任务/P1-30-安装预览只显示hooks.md`：install/uninstall 的预览会打出整份配置（canter 的 api_key 11-11 因此露出）；改成只显示 hooks 的改动。
 
 ## 已知没修的（不主动追，碰到再看）
