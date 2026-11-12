@@ -139,10 +139,7 @@ pub(crate) fn parse(output: &str, ledger: &Ledger) -> Result<Batch> {
                 _ => Err(INVALID_JSON.into()),
             }
         };
-        let action = fields["op"]
-            .as_str()
-            .ok_or(INVALID_JSON)?
-            .trim();
+        let action = fields["op"].as_str().ok_or(INVALID_JSON)?.trim();
         let mutation = match action {
             "add" => Mutation::Add {
                 kind: text("kind")?,
@@ -224,18 +221,21 @@ pub(crate) fn parse(output: &str, ledger: &Ledger) -> Result<Batch> {
 }
 
 fn validate(mutation: &Mutation, ledger: &Ledger) -> std::result::Result<(), String> {
-    match mutation {
+    let item = match mutation {
         Mutation::Add { kind, .. } => {
             if !matches!(kind.as_str(), "state" | "open" | "convention" | "lesson") {
                 return Err("类不合法".into());
             }
+            None
         }
-        Mutation::Edit { no, .. } | Mutation::Close { no, .. } => {
-            if !ledger.items.iter().any(|i| i.no == *no) {
-                return Err("编号不存在".into());
-            }
-        }
-    }
+        Mutation::Edit { no, .. } | Mutation::Close { no, .. } => Some(
+            ledger
+                .items
+                .iter()
+                .find(|i| i.no == *no)
+                .ok_or("编号不存在")?,
+        ),
+    };
     let evidence = match mutation {
         Mutation::Add {
             title,
@@ -272,12 +272,7 @@ fn validate(mutation: &Mutation, ledger: &Ledger) -> std::result::Result<(), Str
     if evidence.is_empty() || evidence.chars().count() > 500 {
         return Err("依据不合格".into());
     }
-    if let Mutation::Edit { no, .. } | Mutation::Close { no, .. } = mutation {
-        let item = ledger
-            .items
-            .iter()
-            .find(|i| i.no == *no)
-            .ok_or("编号不存在")?;
+    if let Some(item) = item {
         if item.status != "active" || item.deleted_at.is_some() {
             return Err(if item.kind == "lesson" {
                 "条目不是有效经验"

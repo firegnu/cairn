@@ -1183,12 +1183,16 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
         ][n];
         if matches!(n, 1 | 2 | 6) {
             f.ok(&["summarize"], "");
-            let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
+            let runs: Value =
+                serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
             assert_eq!(runs[0]["outcome"], "changed");
             assert_eq!(runs[0]["entries"], usize::from(n == 6));
             assert_eq!(runs[0]["lessons"], 1);
             assert_eq!(runs[0]["reason"], expected);
-            assert_eq!(f.ledger()["items"].as_array().unwrap().len(), if n == 6 { 2 } else { 1 });
+            assert_eq!(
+                f.ledger()["items"].as_array().unwrap().len(),
+                if n == 6 { 2 } else { 1 }
+            );
             continue;
         }
         assert!(
@@ -1252,7 +1256,10 @@ fn lesson_and_ledger_caps_are_independent_and_bad_ledger_or_syntax_discards_ever
     let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
     assert_eq!(runs[0]["entries"], 10);
     assert_eq!(runs[0]["lessons"], 5);
-    assert_eq!(runs[0]["reason"], "丢了第 16 笔：理由为空；丢了第 17 笔：标题不合格");
+    assert_eq!(
+        runs[0]["reason"],
+        "丢了第 16 笔：理由为空；丢了第 17 笔：标题不合格"
+    );
 }
 
 #[test]
@@ -1344,7 +1351,10 @@ fn lesson_invalid_group_is_skipped_with_status_reason_and_ledger_progress() {
         );
         let output = f.ok(&["summarize"], "");
         let expected_reason = if group_failure {
-            assert!(output.contains(&format!("经验没写成：{reason}")), "{output}");
+            assert!(
+                output.contains(&format!("经验没写成：{reason}")),
+                "{output}"
+            );
             format!("经验没写成：{reason}")
         } else {
             assert!(!output.contains("没写成"), "{output}");
@@ -1554,14 +1564,23 @@ fn ledger_drops_invalid_changes_and_records_only_committed_counts() {
         "NOTHING_TO_CONTINUE",
         changes(&[
             add("state", "kept state", "body", "evidence"),
-            add("open", "too long", &format!(" \n{}\t ", "界".repeat(342)), "evidence"),
+            add(
+                "open",
+                "too long",
+                &format!(" \n{}\t ", "界".repeat(342)),
+                "evidence",
+            ),
             add("lesson", " \n\t ", "body", "evidence"),
             add("lesson", "kept lesson", "body", "evidence"),
         ]),
         "",
     );
     let result = f.run(&["summarize"], "");
-    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stdout));
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
     let ledger = f.ledger();
     assert_eq!(ledger["version"], 1);
     assert_eq!(ledger["items"].as_array().unwrap().len(), 2);
@@ -1572,11 +1591,17 @@ fn ledger_drops_invalid_changes_and_records_only_committed_counts() {
     assert_eq!(runs[0]["entries"], 1);
     assert_eq!(runs[0]["lessons"], 1);
     assert_eq!(runs[0]["ledger_version"], 1);
-    assert_eq!(runs[0]["reason"], "丢了第 2 笔：正文超过 1 KiB（1026 字节）；丢了第 3 笔：标题不合格");
+    assert_eq!(
+        runs[0]["reason"],
+        "丢了第 2 笔：正文超过 1 KiB（1026 字节）；丢了第 3 笔：标题不合格"
+    );
     let (bytes, failures, cleared): (i64, i64, bool) = f.store().connection().query_row(
         "SELECT ledger_bytes,ledger_failures,ledger_last_failure IS NULL AND ledger_last_failure_at IS NULL FROM sessions", [],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-    assert_eq!(bytes as u64, fs::metadata(f.path("one.jsonl")).unwrap().len());
+    assert_eq!(
+        bytes as u64,
+        fs::metadata(f.path("one.jsonl")).unwrap().len()
+    );
     assert_eq!(failures, 0);
     assert!(cleared);
     let status: Value = serde_json::from_str(&f.ok(&["status", "--json"], "")).unwrap();
@@ -1592,7 +1617,12 @@ fn ledger_records_dropped_changes_alongside_rejected_lesson_group() {
         f.ok(&["adopt"], "");
         f.session("one", "synthetic rejected changes and lesson group");
         let mut output = vec![
-            add("state", "long body", &format!(" {} ", "界".repeat(342)), "evidence"),
+            add(
+                "state",
+                "long body",
+                &format!(" {} ", "界".repeat(342)),
+                "evidence",
+            ),
             add("lesson", "", "body", "evidence"),
         ];
         output.extend(vec![add("lesson", "lesson", "body", "evidence"); 6]);
@@ -1608,17 +1638,32 @@ fn ledger_records_dropped_changes_alongside_rejected_lesson_group() {
             "输出不合格：第 1 笔：正文超过 1 KiB（1026 字节）；第 2 笔：标题不合格；经验没写成：超过 5 笔"
         };
         let runs: Value = serde_json::from_str(&f.ok(&["ledger", "runs", "--json"], "")).unwrap();
-        assert_eq!(runs[0]["outcome"], if keep_entry { "changed" } else { "failed" });
+        assert_eq!(
+            runs[0]["outcome"],
+            if keep_entry { "changed" } else { "failed" }
+        );
         assert_eq!(runs[0]["entries"], usize::from(keep_entry));
         assert_eq!(runs[0]["lessons"], 0);
         assert_eq!(runs[0]["reason"], expected);
         assert_eq!(f.ledger()["version"], i64::from(keep_entry));
-        assert_eq!(f.ledger()["items"].as_array().unwrap().len(), usize::from(keep_entry));
-        let (bytes, failures, reason): (i64, i64, String) = f.store().connection().query_row(
-            "SELECT ledger_bytes,ledger_failures,ledger_last_failure FROM sessions", [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(
+            f.ledger()["items"].as_array().unwrap().len(),
+            usize::from(keep_entry)
+        );
+        let (bytes, failures, reason): (i64, i64, String) = f
+            .store()
+            .connection()
+            .query_row(
+                "SELECT ledger_bytes,ledger_failures,ledger_last_failure FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
         if keep_entry {
-            assert_eq!(bytes as u64, fs::metadata(f.path("one.jsonl")).unwrap().len());
+            assert_eq!(
+                bytes as u64,
+                fs::metadata(f.path("one.jsonl")).unwrap().len()
+            );
             assert_eq!(failures, 0);
             assert_eq!(reason, "经验没写成：超过 5 笔");
         } else {
@@ -1671,7 +1716,10 @@ fn ledger_invalid_outputs_do_not_write_and_failures_stop_only_automatic_attempts
         batch(vec![wrong_type]),
         batch(vec![wrong_op_type]),
         batch(vec![wrong_no_type]),
-        batch(vec![add("state", "", "body", "evidence"), serde_json::json!({})]),
+        batch(vec![
+            add("state", "", "body", "evidence"),
+            serde_json::json!({}),
+        ]),
         changes(&[
             add("state", "long body", &"界".repeat(342), "evidence"),
             add("lesson", "", "body", "evidence"),
