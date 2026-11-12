@@ -25,6 +25,7 @@ const INSTRUCTIONS: &str = r#"你在为一个软件项目维护"项目的账"：
 - 依据摘录会话里用户或助手的原话，不改写、不编。
 - 路径、提交号、版本号这类细节原样照抄。
 - 标题一行，不超过 200 字符；正文不超过约 300 个汉字；依据不超过 500 字符；一次最多 10 笔账的变动，另外最多 5 笔经验的变动。
+- 标题是一句话的概括；修改一条时重写整句标题，不要往原标题后面追加，清单和细节写进正文。
 - 经验一次最多记 3 条最值得留的，拿不准的不记。
 - 经验：拿不准的、只发生一次以后不会再遇到的、只是这个会话里的权宜之计，不记。用户说“以后都这样做”的，记成 convention，不记成 lesson。已有相同或相近的经验，改那一条，不要重复新增；两条说的是一回事，改其中一条、了结另一条。经验被证明不对、或者条件已经不成立，了结它，理由写清。
 - 标题、理由、依据不能为空，正文可以为空；字段首尾空白会被去掉。同一条不能既修改又了结。
@@ -249,11 +250,14 @@ fn validate(mutation: &Mutation, ledger: &Ledger) -> std::result::Result<(), Str
             evidence,
             ..
         } => {
-            if title.is_empty()
-                || title.chars().count() > 200
-                || title.chars().any(char::is_control)
-            {
-                return Err("标题不合格".into());
+            if title.is_empty() {
+                return Err("标题为空".into());
+            }
+            if title.chars().count() > 200 {
+                return Err("标题超过 200 字符".into());
+            }
+            if title.chars().any(char::is_control) {
+                return Err("标题有换行或控制字符".into());
             }
             if body.len() > 1024 {
                 return Err(format!("正文超过 1 KiB（{} 字节）", body.len()));
